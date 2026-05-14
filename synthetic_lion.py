@@ -39,9 +39,9 @@ Because this transition is maximally surprising, the DAI-P transition model
 carries a high residual prediction error—high perceptive-epistemic gain—for
 the buy-label-A action, driving the agent to execute it early.
 
-DDQN explores with Boltzmann sampling over Q-values and relies on
-discovering the reward signal of label-A through trial and error.  It can
-eventually converge, but it loses critical budget in the early episodes.
+DDQN explores with ε-greedy and relies on discovering the reward signal of
+label-A through trial and error.  It can eventually converge, but it loses
+critical budget in the early episodes.
 
 The Break-Even agent buys the label with the HIGHEST anomaly score first
 (the natural heuristic).  Unknown A has the LOWEST anomaly score (it looks
@@ -65,7 +65,7 @@ Architecture overview
     SyntheticLIONEnv   budget episode (block=0 / accept=1 / buy-label=2)
     TwoStreamNet       shared backbone for Q-net / EFE-net  (5 extero + 9 proprio)
     TransitionNet      predicts next proprioceptive state (9-D) from (state, action)
-    DDQNAgent          Double-DQN with Boltzmann sampling (no epistemic gain)
+    DDQNAgent          Double-DQN with ε-greedy exploration (no epistemic gain)
     DAIPAgent          DAI-P: reward + epistemic gain from transition MSE
     BreakEvenAgent     rule-based: buy highest-anomaly-score unlabelled cluster when affordable
 """
@@ -158,8 +158,12 @@ CFG = dict(
     batch_size   = 64,
     memory_size  = 6000,
     target_update = 20,       # steps between target-net hard updates
-    temperature  = 2.0,       # Boltzmann softmax temperature
+    temperature  = 2.0,       # Boltzmann temperature (DAI-P only)
     min_memory_to_train = 128,
+    # DDQN ε-greedy exploration
+    epsilon_start = 1.0,
+    epsilon_end   = 0.05,
+    epsilon_decay = 0.9995,   # multiplicative decay per training step
 
     # DAI-P
     epistemic_weight = 0.5,   # weight on perceptive-epistemic gain in EFE target
@@ -769,14 +773,16 @@ class ReplayBuffer:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class DDQNAgent:
-    """Double-DQN with Boltzmann sampling.  No epistemic gain — pure reward."""
+    """Double-DQN with ε-greedy exploration.  No epistemic gain — pure reward."""
 
     def __init__(self, cfg: dict):
         self.gamma       = cfg['gamma']
         self.batch_size  = cfg['batch_size']
-        self.temperature = cfg['temperature']
         self.target_upd  = cfg['target_update']
         self.min_mem     = cfg['min_memory_to_train']
+        self.epsilon     = cfg.get('epsilon_start', 1.0)
+        self.epsilon_end = cfg.get('epsilon_end',   0.05)
+        self.epsilon_dec = cfg.get('epsilon_decay', 0.9995)
         self.device      = torch.device(cfg.get('device', 'cpu'))
 
         self.net    = TwoStreamNet().to(self.device)
@@ -788,10 +794,10 @@ class DDQNAgent:
         self._steps = 0
 
     def act(self, state: torch.Tensor) -> int:
+        if random.random() < self.epsilon:
+            return random.randrange(ACTION_SIZE)
         with torch.no_grad():
-            q     = self.net(state.to(self.device)).squeeze()
-            probs = F.softmax(self.temperature * q, dim=-1)
-        return torch.multinomial(probs, 1).item()
+            return self.net(state.to(self.device)).squeeze().argmax().item()
 
     def push(self, s, a, r, s2, done):
         # Store on CPU; moved to device at training time to save GPU memory.
@@ -827,6 +833,7 @@ class DDQNAgent:
         self._steps += 1
         if self._steps % self.target_upd == 0:
             self.target.load_state_dict(self.net.state_dict())
+        self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_dec)
         return {'loss': loss.item()}
 
 
@@ -879,6 +886,16 @@ class DAIPAgent:
             nefe  = self.efe_net(state.to(self.device)).squeeze()
             probs = F.softmax(self.temperature * nefe, dim=-1)
         return torch.multinomial(probs, 1).item()
+
+    def compute_epist(self, state: torch.Tensor, action: int,
+                      next_state: torch.Tensor) -> float:
+        """Single-step epistemic gain for a specific (state, action, next_state)."""
+        with torch.no_grad():
+            s   = state.unsqueeze(0).to(self.device)
+            aoh = self._eye[action].unsqueeze(0)
+            pred_next   = self.trans_net(s, aoh)
+            next_proprio = next_state[-PROPRIO_DIM:].unsqueeze(0).to(self.device)
+            return 0.5 * ((next_proprio - pred_next) ** 2).sum().item()
 
     def push(self, s, a, r, s2, done):
         self.buf.push(s.cpu(), torch.tensor(a),
@@ -1011,8 +1028,10 @@ class EpisodeStats:
     # training losses (averaged over all gradient steps in the episode)
     mean_loss:       float = 0.0
     mean_trans_loss: float = 0.0  # DAI-P only
-    # DAI-P only; mean batch epistemic gain per action (0=block,1=accept,2=buy_label)
-    epist_per_action: Dict[int, float] = field(default_factory=lambda: {0: 0.0, 1: 0.0, 2: 0.0})
+    # DAI-P only; mean batch epistemic gain per action (0=block, 1=accept, 2=buy_label)
+    epist_per_action:      Dict[int, float] = field(default_factory=lambda: {0: 0.0, 1: 0.0, 2: 0.0})
+    # DAI-P only; mean single-step epistemic gain when buying each cluster (uid 0-3 = A-D)
+    epist_buy_per_cluster: Dict[int, float] = field(default_factory=lambda: {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0})
     # per-step data for space visualisation (populated only when collect_vis=True)
     step_rewards:  List[float] = field(default_factory=list)
     input_points:  List        = field(default_factory=list)  # (N, 2) raw inputs
@@ -1026,7 +1045,8 @@ def run_episode(agent, env: SyntheticLIONEnv, train: bool = True,
     state = env.reset()
     stats = EpisodeStats()
     losses, trans_losses = [], []
-    epist_by_action: Dict[int, List[float]] = {0: [], 1: [], 2: []}
+    epist_by_action:  Dict[int, List[float]] = {0: [], 1: [], 2: []}
+    epist_buy_by_uid: Dict[int, List[float]] = {0: [], 1: [], 2: [], 3: []}
 
     while True:
         # Capture current flow before step() mutates it (loads next flow)
@@ -1047,10 +1067,14 @@ def run_episode(agent, env: SyntheticLIONEnv, train: bool = True,
         if collect_vis:
             stats.step_rewards.append(reward)
 
-        # Record label-purchase events (step index inside episode)
+        # Record label-purchase events and per-cluster epistemic gain
         for uid, (before, after) in enumerate(zip(prev_labels, info['labels'])):
             if not before and after:
                 stats.label_buy_steps.append((env.t, uid))
+                if isinstance(agent, DAIPAgent):
+                    epist_buy_by_uid[uid].append(
+                        agent.compute_epist(state, action, next_state)
+                    )
 
         if train:
             agent.push(state, action, reward, next_state, done)
@@ -1074,6 +1098,10 @@ def run_episode(agent, env: SyntheticLIONEnv, train: bool = True,
             stats.epist_per_action = {
                 a: float(np.mean(vals)) if vals else 0.0
                 for a, vals in epist_by_action.items()
+            }
+            stats.epist_buy_per_cluster = {
+                uid: float(np.mean(vals)) if vals else 0.0
+                for uid, vals in epist_buy_by_uid.items()
             }
             break
 
@@ -1243,18 +1271,21 @@ def _run_one(task: dict) -> dict:
                     f'loss={stats.mean_loss:.4f}')
             if agent_name == 'DAI-P':
                 line += f'  tloss={stats.mean_trans_loss:.4f}'
-                line += f'  epist_buy={stats.epist_per_action.get(2, 0.0):.4f}'
+                line += f'  epist_buyA={stats.epist_buy_per_cluster.get(0, 0.0):.4f}'
             print(line, flush=True)
 
-        wm = dict(reward=stats.total_reward, win=int(stats.win),
+        mean_reward = stats.total_reward / max(stats.n_steps, 1)
+        wm = dict(reward=mean_reward, win=int(stats.win),
                   n_labels=stats.n_labels, label_A=int(stats.labels[0]),
                   budget_final=stats.budget_final, n_steps=stats.n_steps,
                   loss=stats.mean_loss)
         if agent_name == 'DAI-P':
             wm['trans_loss'] = stats.mean_trans_loss
-            _action_names = {0: 'block', 1: 'accept', 2: 'buy_label'}
-            for a_idx, a_name in _action_names.items():
+            for a_idx, a_name in {0: 'block', 1: 'accept'}.items():
                 wm[f'epistemic_gains/{a_name}'] = stats.epist_per_action.get(a_idx, 0.0)
+            _cluster_names = {0: 'A', 1: 'B', 2: 'C', 3: 'D'}
+            for uid, name in _cluster_names.items():
+                wm[f'epistemic_gains/buy_{name}'] = stats.epist_buy_per_cluster.get(uid, 0.0)
 
         if at_log and wlog.active:
             wm.update(_space_scatter_figs(stats, seed))
