@@ -39,9 +39,9 @@ Because this transition is maximally surprising, the DAI-P transition model
 carries a high residual prediction error—high perceptive-epistemic gain—for
 the buy-label-A action, driving the agent to execute it early.
 
-DDQN explores with Boltzmann sampling over Q-values and relies on
-discovering the reward signal of label-A through trial and error.  It can
-eventually converge, but it loses critical budget in the early episodes.
+DDQN explores with ε-greedy and relies on discovering the reward signal of
+label-A through trial and error.  It can eventually converge, but it loses
+critical budget in the early episodes.
 
 The Break-Even agent buys the label with the HIGHEST anomaly score first
 (the natural heuristic).  Unknown A has the LOWEST anomaly score (it looks
@@ -65,7 +65,7 @@ Architecture overview
     SyntheticLIONEnv   budget episode (block=0 / accept=1 / buy-label=2)
     TwoStreamNet       shared backbone for Q-net / EFE-net  (5 extero + 9 proprio)
     TransitionNet      predicts next proprioceptive state (9-D) from (state, action)
-    DDQNAgent          Double-DQN with Boltzmann sampling (no epistemic gain)
+    DDQNAgent          Double-DQN with ε-greedy exploration (no epistemic gain)
     DAIPAgent          DAI-P: reward + epistemic gain from transition MSE
     BreakEvenAgent     rule-based: buy highest-anomaly-score unlabelled cluster when affordable
 """
@@ -90,6 +90,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+
+try:
+    from sklearn.decomposition import PCA as _PCA
+    _SKLEARN = True
+except ImportError:
+    _SKLEARN = False
+
+try:
+    import plotly.express as _px
+    _PLOTLY = True
+except ImportError:
+    _PLOTLY = False
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -146,8 +158,12 @@ CFG = dict(
     batch_size   = 64,
     memory_size  = 6000,
     target_update = 20,       # steps between target-net hard updates
-    temperature  = 2.0,       # Boltzmann softmax temperature
+    temperature  = 2.0,       # Boltzmann temperature (DAI-P only)
     min_memory_to_train = 128,
+    # DDQN ε-greedy exploration
+    epsilon_start = 1.0,
+    epsilon_end   = 0.05,
+    epsilon_decay = 0.9995,   # multiplicative decay per training step
 
     # DAI-P
     epistemic_weight = 0.5,   # weight on perceptive-epistemic gain in EFE target
@@ -757,14 +773,16 @@ class ReplayBuffer:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class DDQNAgent:
-    """Double-DQN with Boltzmann sampling.  No epistemic gain — pure reward."""
+    """Double-DQN with ε-greedy exploration.  No epistemic gain — pure reward."""
 
     def __init__(self, cfg: dict):
         self.gamma       = cfg['gamma']
         self.batch_size  = cfg['batch_size']
-        self.temperature = cfg['temperature']
         self.target_upd  = cfg['target_update']
         self.min_mem     = cfg['min_memory_to_train']
+        self.epsilon     = cfg.get('epsilon_start', 1.0)
+        self.epsilon_end = cfg.get('epsilon_end',   0.05)
+        self.epsilon_dec = cfg.get('epsilon_decay', 0.9995)
         self.device      = torch.device(cfg.get('device', 'cpu'))
 
         self.net    = TwoStreamNet().to(self.device)
@@ -776,10 +794,10 @@ class DDQNAgent:
         self._steps = 0
 
     def act(self, state: torch.Tensor) -> int:
+        if random.random() < self.epsilon:
+            return random.randrange(ACTION_SIZE)
         with torch.no_grad():
-            q     = self.net(state.to(self.device)).squeeze()
-            probs = F.softmax(self.temperature * q, dim=-1)
-        return torch.multinomial(probs, 1).item()
+            return self.net(state.to(self.device)).squeeze().argmax().item()
 
     def push(self, s, a, r, s2, done):
         # Store on CPU; moved to device at training time to save GPU memory.
@@ -815,6 +833,7 @@ class DDQNAgent:
         self._steps += 1
         if self._steps % self.target_upd == 0:
             self.target.load_state_dict(self.net.state_dict())
+        self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_dec)
         return {'loss': loss.item()}
 
 
@@ -868,6 +887,16 @@ class DAIPAgent:
             probs = F.softmax(self.temperature * nefe, dim=-1)
         return torch.multinomial(probs, 1).item()
 
+    def compute_epist(self, state: torch.Tensor, action: int,
+                      next_state: torch.Tensor) -> float:
+        """Single-step epistemic gain for a specific (state, action, next_state)."""
+        with torch.no_grad():
+            s   = state.unsqueeze(0).to(self.device)
+            aoh = self._eye[action].unsqueeze(0)
+            pred_next   = self.trans_net(s, aoh)
+            next_proprio = next_state[-PROPRIO_DIM:].unsqueeze(0).to(self.device)
+            return 0.5 * ((next_proprio - pred_next) ** 2).sum().item()
+
     def push(self, s, a, r, s2, done):
         self.buf.push(s.cpu(), torch.tensor(a),
                       torch.tensor(r, dtype=torch.float32),
@@ -891,6 +920,13 @@ class DAIPAgent:
         with torch.no_grad():
             pred_next = self.trans_net(S, AOH)
             epist     = 0.5 * ((next_proprio - pred_next) ** 2).sum(dim=1, keepdim=True)
+
+        # per-action mean epistemic gain (block=0, accept=1, buy_label=2)
+        epist_per_action: Dict[int, float] = {}
+        for a_idx in range(ACTION_SIZE):
+            mask = (A == a_idx)
+            if mask.any():
+                epist_per_action[a_idx] = epist[mask].mean().item()
 
         # ── EFE targets ───────────────────────────────────────────────────────
         with torch.no_grad():
@@ -921,7 +957,8 @@ class DAIPAgent:
         if self._steps % self.target_upd == 0:
             self.efe_target.load_state_dict(self.efe_net.state_dict())
 
-        return {'loss': efe_loss.item(), 'trans_loss': trans_loss.item()}
+        return {'loss': efe_loss.item(), 'trans_loss': trans_loss.item(),
+                'epist_per_action': epist_per_action}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -991,14 +1028,35 @@ class EpisodeStats:
     # training losses (averaged over all gradient steps in the episode)
     mean_loss:       float = 0.0
     mean_trans_loss: float = 0.0  # DAI-P only
+    # DAI-P only; mean batch epistemic gain per action (0=block, 1=accept, 2=buy_label)
+    epist_per_action:      Dict[int, float] = field(default_factory=lambda: {0: 0.0, 1: 0.0, 2: 0.0})
+    # DAI-P only; mean single-step epistemic gain when buying each cluster (uid 0-3 = A-D)
+    epist_buy_per_cluster: Dict[int, float] = field(default_factory=lambda: {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0})
+    # per-step data for space visualisation (populated only when collect_vis=True)
+    step_rewards:  List[float] = field(default_factory=list)
+    input_points:  List        = field(default_factory=list)  # (N, 2) raw inputs
+    hidden_vecs:   List        = field(default_factory=list)  # (N, d_h) encoder outputs
+    gt_labels:     List[str]   = field(default_factory=list)
+    pred_labels:   List[str]   = field(default_factory=list)
 
 
-def run_episode(agent, env: SyntheticLIONEnv, train: bool = True) -> EpisodeStats:
+def run_episode(agent, env: SyntheticLIONEnv, train: bool = True,
+                collect_vis: bool = False) -> EpisodeStats:
     state = env.reset()
     stats = EpisodeStats()
     losses, trans_losses = [], []
+    epist_by_action:  Dict[int, List[float]] = {0: [], 1: [], 2: []}
+    epist_buy_by_uid: Dict[int, List[float]] = {0: [], 1: [], 2: [], 3: []}
 
     while True:
+        # Capture current flow before step() mutates it (loads next flow)
+        if collect_vis:
+            f = env._flow
+            stats.input_points.append(f['x'].copy())
+            stats.hidden_vecs.append(f['h'].squeeze(0).detach().cpu().numpy())
+            stats.gt_labels.append(_flow_gt_label(f, env.dg))
+            stats.pred_labels.append(_flow_pred_label(f))
+
         action = agent.act(state, env) if isinstance(agent, BreakEvenAgent) \
                  else agent.act(state)
 
@@ -1006,17 +1064,27 @@ def run_episode(agent, env: SyntheticLIONEnv, train: bool = True) -> EpisodeStat
         next_state, reward, done, info = env.step(action)
         stats.total_reward += reward
 
-        # Record label-purchase events (step index inside episode)
+        if collect_vis:
+            stats.step_rewards.append(reward)
+
+        # Record label-purchase events and per-cluster epistemic gain
         for uid, (before, after) in enumerate(zip(prev_labels, info['labels'])):
             if not before and after:
                 stats.label_buy_steps.append((env.t, uid))
+                if isinstance(agent, DAIPAgent):
+                    epist_buy_by_uid[uid].append(
+                        agent.compute_epist(state, action, next_state)
+                    )
 
         if train:
             agent.push(state, action, reward, next_state, done)
             loss_info = agent.train_step()
             if loss_info:
-                if 'loss'       in loss_info: losses.append(loss_info['loss'])
-                if 'trans_loss' in loss_info: trans_losses.append(loss_info['trans_loss'])
+                if 'loss'            in loss_info: losses.append(loss_info['loss'])
+                if 'trans_loss'      in loss_info: trans_losses.append(loss_info['trans_loss'])
+                if 'epist_per_action' in loss_info:
+                    for a_idx, val in loss_info['epist_per_action'].items():
+                        epist_by_action[a_idx].append(val)
 
         state = next_state
         if done:
@@ -1027,9 +1095,93 @@ def run_episode(agent, env: SyntheticLIONEnv, train: bool = True) -> EpisodeStat
             stats.budget_final    = info['budget']
             stats.mean_loss       = float(np.mean(losses))       if losses       else 0.0
             stats.mean_trans_loss = float(np.mean(trans_losses)) if trans_losses else 0.0
+            stats.epist_per_action = {
+                a: float(np.mean(vals)) if vals else 0.0
+                for a, vals in epist_by_action.items()
+            }
+            stats.epist_buy_per_cluster = {
+                uid: float(np.mean(vals)) if vals else 0.0
+                for uid, vals in epist_buy_by_uid.items()
+            }
             break
 
     return stats
+
+
+def _flow_gt_label(flow: dict, dg: DataGenerator) -> str:
+    """Human-readable ground-truth class name from a cached flow dict."""
+    if flow['is_known']:
+        k = flow['class_id']
+        return f'K{k}({dg.KNOWN_TYPES[k][:3]})'
+    uid = flow['unknown_id']
+    return dg.UNKNOWN_NAMES[uid]
+
+
+def _flow_pred_label(flow: dict) -> str:
+    """Label assigned by the inference module (known class or unknown cluster)."""
+    if not flow['is_anom']:
+        return f'known_{flow["pred_k"]}'
+    return f'unk_c{flow["cid"]}'
+
+
+def _project_to_2d(vectors_np: np.ndarray, seed: int = 42) -> Optional[np.ndarray]:
+    """Robust PCA projection to 2D, mirroring TigerReporter.project_to_2d."""
+    if not _SKLEARN or vectors_np.shape[1] < 2:
+        return None
+    if vectors_np.shape[1] == 2:
+        return vectors_np
+    min_dim = min(vectors_np.shape[0], vectors_np.shape[1])
+    solver  = 'randomized' if min_dim > 2 else 'full'
+    try:
+        return _PCA(n_components=2, svd_solver=solver,
+                    random_state=seed, copy=False).fit_transform(vectors_np)
+    except Exception:
+        try:
+            return _PCA(n_components=2, svd_solver='full',
+                        copy=False).fit_transform(vectors_np)
+        except Exception:
+            return None
+
+
+def _space_scatter_figs(stats: EpisodeStats, seed: int) -> dict:
+    """
+    Build Plotly scatter figures for input space and hidden space.
+    Input space is already 2-D so no PCA is needed.
+    Hidden space (d_h-D) is projected to 2-D via PCA.
+    Returns a dict ready to pass to wandb.log().
+    """
+    if not _PLOTLY or not stats.input_points:
+        return {}
+
+    inp = np.array(stats.input_points)          # (N, 2)
+    hid = np.stack(stats.hidden_vecs)           # (N, d_h)
+    gt  = stats.gt_labels
+    pr  = stats.pred_labels
+    figs: dict = {}
+
+    # ── input space (no PCA — raw 2-D Gaussians) ────────────────────────────
+    for labels, tag in [(gt, 'gt'), (pr, 'pred')]:
+        fig = _px.scatter(
+            x=inp[:, 0], y=inp[:, 1], color=labels,
+            labels={'x': 'x₁', 'y': 'x₂', 'color': 'Label'},
+            title=f'Input space – {tag}',
+        )
+        fig.update_traces(marker=dict(size=7, opacity=0.65))
+        figs[f'InputSpace/{tag}'] = fig
+
+    # ── hidden space (PCA → 2-D) ─────────────────────────────────────────────
+    hid2 = _project_to_2d(hid, seed=seed)
+    if hid2 is not None:
+        for labels, tag in [(gt, 'gt'), (pr, 'pred')]:
+            fig = _px.scatter(
+                x=hid2[:, 0], y=hid2[:, 1], color=labels,
+                labels={'x': 'PC1', 'y': 'PC2', 'color': 'Label'},
+                title=f'Hidden space – {tag}',
+            )
+            fig.update_traces(marker=dict(size=7, opacity=0.65))
+            figs[f'HiddenSpace/{tag}'] = fig
+
+    return figs
 
 
 def smooth(xs: List[float], w: int = 15) -> List[float]:
@@ -1095,7 +1247,8 @@ def _run_one(task: dict) -> dict:
     ep_rewards, ep_wins, ep_labels, ep_labelA, ep_budget = [], [], [], [], []
 
     for ep in range(n_episodes):
-        stats = run_episode(agent, env, train=True)
+        at_log = log_interval > 0 and (ep + 1) % log_interval == 0
+        stats = run_episode(agent, env, train=True, collect_vis=at_log and wlog.active)
         ep_rewards.append(stats.total_reward)
         ep_wins.append(int(stats.win))
         ep_labels.append(stats.n_labels)
@@ -1108,7 +1261,7 @@ def _run_one(task: dict) -> dict:
                     f'→ uid={uid} ({dg.UNKNOWN_NAMES[uid]}/{dg.UNKNOWN_TYPES[uid]}) '
                     f'step={step_idx:3d}  budget={stats.budget_final:.2f}', flush=True)
 
-        if log_interval > 0 and (ep + 1) % log_interval == 0:
+        if at_log:
             w  = log_interval
             sl = slice(max(0, ep + 1 - w), ep + 1)
             line = (f'    [ep {ep+1:4d}] {agent_name:10s} seed={seed} '
@@ -1118,14 +1271,25 @@ def _run_one(task: dict) -> dict:
                     f'loss={stats.mean_loss:.4f}')
             if agent_name == 'DAI-P':
                 line += f'  tloss={stats.mean_trans_loss:.4f}'
+                line += f'  epist_buyA={stats.epist_buy_per_cluster.get(0, 0.0):.4f}'
             print(line, flush=True)
 
-        wm = dict(reward=stats.total_reward, win=int(stats.win),
+        mean_reward = stats.total_reward / max(stats.n_steps, 1)
+        wm = dict(reward=mean_reward, win=int(stats.win),
                   n_labels=stats.n_labels, label_A=int(stats.labels[0]),
                   budget_final=stats.budget_final, n_steps=stats.n_steps,
                   loss=stats.mean_loss)
         if agent_name == 'DAI-P':
             wm['trans_loss'] = stats.mean_trans_loss
+            for a_idx, a_name in {0: 'block', 1: 'accept'}.items():
+                wm[f'epistemic_gains/{a_name}'] = stats.epist_per_action.get(a_idx, 0.0)
+            _cluster_names = {0: 'A', 1: 'B', 2: 'C', 3: 'D'}
+            for uid, name in _cluster_names.items():
+                wm[f'epistemic_gains/buy_{name}'] = stats.epist_buy_per_cluster.get(uid, 0.0)
+
+        if at_log and wlog.active:
+            wm.update(_space_scatter_figs(stats, seed))
+
         wlog.log(wm, step=ep)
 
     if verbose:
@@ -1333,7 +1497,7 @@ def main():
     parser.add_argument('--seeds',             type=int,  default=5)
     parser.add_argument('--no-plot',           action='store_true')
     parser.add_argument('--verbose',           action='store_true', default=False)
-    parser.add_argument('--log-interval',      type=int,  default=50,
+    parser.add_argument('--log-interval',      type=int,  default=0,
                         help='Print running stats every N episodes (0=off)')
     # GPU / parallelism
     parser.add_argument('--gpus',              type=str,  default='0',
