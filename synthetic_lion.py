@@ -128,7 +128,14 @@ CFG = dict(
 
     # unknown flows before label is bought
     # A: overlapping-malicious, B: separate-malicious, C: separate-benign, D: near-malicious-benign
-    r_accept_A_uninformed =  -7.0,   # agent is fooled: thinks it's benign, accepts
+    #
+    # UA is a SLEEPER THREAT: accepting it looks benign immediately (+0.5) but
+    # triggers a deferred budget drain spread over the next ua_deferred_steps steps.
+    # This forces DDQN to credit-assign across multiple unrelated transitions,
+    # while DAI-P's one-step epistemic gain (conf_unk[0]→0 on buy) remains immediate.
+    r_accept_A_uninformed =  +0.5,   # immediate: looks benign, fools the agent
+    ua_deferred_drain     =  -2.5,   # budget drain per deferred step
+    ua_deferred_steps     =   4,     # fires for 4 steps → total −10.0 net damage
     r_block_A_uninformed  =   0.5,   # accidental good block
     r_accept_B_uninformed =  -3.5,   # anomaly visible, but accepting possible
     r_block_B_uninformed  =   1.5,   # anomaly detected and blocked
@@ -544,9 +551,10 @@ class SyntheticLIONEnv:
         self._pretrained_n_known = inf_mod.known_protos.shape[0]
 
     def reset(self) -> torch.Tensor:
-        self.budget        = self.cfg['init_budget']
-        self.t             = 0
-        self.labels_bought = [False] * self.n_unk
+        self.budget           = self.cfg['init_budget']
+        self.t                = 0
+        self.labels_bought    = [False] * self.n_unk
+        self._deferred_drains = []   # list of (fire_at_t, amount) from UA sleeper accepts
         self.inf.reset_episode_state(self._pretrained_n_known, self.dg)
         self._step_flow()
         return self._state()
@@ -613,6 +621,11 @@ class SyntheticLIONEnv:
         f   = self._flow
         cfg = self.cfg
         uid = f['unknown_id']
+
+        # ── fire any deferred drains queued by past UA sleeper accepts ──────────
+        deferred = sum(amt for (t, amt) in self._deferred_drains if t == self.t)
+        self._deferred_drains = [(t, amt) for (t, amt) in self._deferred_drains
+                                 if t != self.t]
         reward = 0.0
 
         if action == 2:                         # ── buy label ──
@@ -652,7 +665,14 @@ class SyntheticLIONEnv:
                           else cfg['r_accept_malicious_informed'])
             else:
                 reward = cfg.get(f'r_accept_{self.dg.UNKNOWN_NAMES[uid][0]}_uninformed', -1.0)
+                # UA sleeper: queue deferred budget drains so the damage arrives
+                # spread across future steps instead of all at once.
+                if self.dg.UNKNOWN_NAMES[uid][0] == 'A':
+                    drain = cfg.get('ua_deferred_drain', 0.0)
+                    for k in range(1, cfg.get('ua_deferred_steps', 0) + 1):
+                        self._deferred_drains.append((self.t + k, drain))
 
+        reward += deferred
         self.budget += reward
         self.t      += 1
         done = (self.budget <= cfg['min_budget']
