@@ -1466,7 +1466,7 @@ def main():
     parser.add_argument('--seeds',             type=int,  default=5)
     parser.add_argument('--no-plot',           action='store_true')
     parser.add_argument('--verbose',           action='store_true', default=False)
-    parser.add_argument('--log-interval',      type=int,  default=50,
+    parser.add_argument('--log-interval',      type=int,  default=0,
                         help='Print running stats every N episodes (0=off)')
     # GPU / parallelism
     parser.add_argument('--gpus',              type=str,  default='0',
