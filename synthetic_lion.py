@@ -152,6 +152,13 @@ CFG = dict(
     # DAI-P
     epistemic_weight = 0.5,   # weight on perceptive-epistemic gain in EFE target
 
+    # Integration lag: steps after buying a label before the prototype is promoted
+    # to the known-class list.  During the lag the state-change signal (conf_unk_0
+    # zeroed) fires immediately — giving DAI-P its epistemic boost — but informed
+    # rewards are withheld because the inference module hasn't integrated the label yet.
+    # This dilutes DDQN's TD credit assignment while leaving DAI-P's advantage intact.
+    label_integration_lag = 15,
+
     # Inference module
     anomaly_threshold = 1.8,  # hidden-space L2 distance → anomaly if >
     proto_ema         = 0.08, # EMA coefficient for unknown prototype update
@@ -546,7 +553,9 @@ class SyntheticLIONEnv:
     def reset(self) -> torch.Tensor:
         self.budget        = self.cfg['init_budget']
         self.t             = 0
-        self.labels_bought = [False] * self.n_unk
+        self.labels_bought      = [False] * self.n_unk
+        self.labels_integrated  = [False] * self.n_unk  # True once proto promoted
+        self.integration_countdown: dict[int, int] = {}  # uid → steps remaining
         self.inf.reset_episode_state(self._pretrained_n_known, self.dg)
         self._step_flow()
         return self._state()
@@ -625,16 +634,27 @@ class SyntheticLIONEnv:
                 reward = -price * 0.05          # tiny immediate cost signal
                 self.budget -= price
                 self.labels_bought[uid] = True
-                self.inf.add_known_proto(self.inf.unk_protos[uid],
-                                         self.dg.UNKNOWN_TYPES[uid])
-                self.inf.unk_conf[uid] = 0.0   # cluster resolved; zero its proprio slot
+                # Zero conf immediately → largest proprioceptive state change,
+                # giving DAI-P its epistemic gain signal right away.
+                self.inf.unk_conf[uid] = 0.0
+                # Prototype promotion is delayed by label_integration_lag steps.
+                # During the lag, flows from this class still receive uninformed
+                # rewards, so DDQN's TD credit assignment is diluted while
+                # DAI-P's one-step epistemic gain is unaffected.
+                lag = cfg.get('label_integration_lag', 0)
+                if lag > 0:
+                    self.integration_countdown[uid] = lag
+                else:
+                    self.inf.add_known_proto(self.inf.unk_protos[uid],
+                                             self.dg.UNKNOWN_TYPES[uid])
+                    self.labels_integrated[uid] = True
 
         elif action == 0:                       # ── block ──
             if f['is_known']:
                 ctype  = self.inf.known_types_list[f['pred_k']]
                 reward = (cfg['r_block_malicious_informed'] if ctype == 'malicious'
                           else cfg['r_block_benign_informed'])
-            elif uid is not None and self.labels_bought[uid]:
+            elif uid is not None and self.labels_integrated[uid]:
                 ctype  = self.dg.UNKNOWN_TYPES[uid]
                 reward = (cfg['r_block_malicious_informed'] if ctype == 'malicious'
                           else cfg['r_block_benign_informed'])
@@ -646,7 +666,7 @@ class SyntheticLIONEnv:
                 ctype  = self.inf.known_types_list[f['pred_k']]
                 reward = (cfg['r_accept_benign_informed'] if ctype == 'benign'
                           else cfg['r_accept_malicious_informed'])
-            elif uid is not None and self.labels_bought[uid]:
+            elif uid is not None and self.labels_integrated[uid]:
                 ctype  = self.dg.UNKNOWN_TYPES[uid]
                 reward = (cfg['r_accept_benign_informed'] if ctype == 'benign'
                           else cfg['r_accept_malicious_informed'])
@@ -655,6 +675,16 @@ class SyntheticLIONEnv:
 
         self.budget += reward
         self.t      += 1
+
+        # Tick integration countdowns; promote any that complete this step.
+        for lu in list(self.integration_countdown):
+            self.integration_countdown[lu] -= 1
+            if self.integration_countdown[lu] <= 0:
+                del self.integration_countdown[lu]
+                self.inf.add_known_proto(self.inf.unk_protos[lu],
+                                         self.dg.UNKNOWN_TYPES[lu])
+                self.labels_integrated[lu] = True
+
         done = (self.budget <= cfg['min_budget']
                 or self.budget >= cfg['max_budget']
                 or self.t     >= cfg['max_steps'])
