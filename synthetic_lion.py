@@ -454,9 +454,17 @@ class InferenceModule(nn.Module):
         pred_k, conf_k, dists_k = self.known_classify(h)
         anorm_score, is_anom     = self.anomaly_detect(dists_k)
         cid, cconf, cweights     = self.unk_cluster(h)
-        return dict(h=h, pred_k=pred_k, conf_k=conf_k, dists_k=dists_k,
-                    anorm_score=anorm_score, is_anom=is_anom,
-                    cid=cid, cconf=cconf, cweights=cweights)
+        return dict(
+            h=h, 
+            pred_k=pred_k, 
+            conf_k=conf_k, 
+            dists_k=dists_k,
+            anorm_score=anorm_score, 
+            is_anom=is_anom,
+            cid=cid, 
+            cconf=cconf, 
+            cweights=cweights
+            )
 
 
 def pretrain_inference(inf: InferenceModule, dg: DataGenerator, cfg: dict) -> float:
@@ -550,10 +558,16 @@ class SyntheticLIONEnv:
         with torch.no_grad():
             r = self.inf(xt)
         self._flow = dict(
-            x=x, class_id=cid, is_known=is_k, unknown_id=uid, class_type=ctype,
+            x=x, 
+            class_id=cid, 
+            is_known=is_k, 
+            unknown_id=uid, 
+            class_type=ctype,
             h=r['h'],
-            pred_k=r['pred_k'].item(), conf_k=r['conf_k'].item(),
-            anorm_score=r['anorm_score'].item(), is_anom=r['is_anom'].item(),
+            pred_k=r['pred_k'].item(), 
+            conf_k=r['conf_k'].item(),
+            anorm_score=r['anorm_score'].item(), 
+            is_anom=r['is_anom'].item(),
             cid=r['cid'].item()   if uid is not None else -1,
             cconf=r['cconf'].item() if uid is not None else r['conf_k'].item(),
         )
