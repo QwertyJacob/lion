@@ -1328,8 +1328,8 @@ def main():
     parser.add_argument('--min-free-gpu-gb',   type=float, default=10.0,
                         help='Min free VRAM (GB) for --gpus auto (default 10)')
     # Wandb
-    parser.add_argument('--wandb-project',     type=str,  default=None)
-    parser.add_argument('--wandb-entity',      type=str,  default=None)
+    parser.add_argument('--wandb-project',     type=str,  default='LION')
+    parser.add_argument('--wandb-entity',      type=str,  default='jfcevallos')
     parser.add_argument('--wandb-group',       type=str,  default=None)
     parser.add_argument('--env-file',          type=str,  default='.env')
     parser.add_argument('--plot-path',         type=str,
