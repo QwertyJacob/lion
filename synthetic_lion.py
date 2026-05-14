@@ -91,6 +91,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
+try:
+    from sklearn.decomposition import PCA as _PCA
+    _SKLEARN = True
+except ImportError:
+    _SKLEARN = False
+
+try:
+    import plotly.express as _px
+    _PLOTLY = True
+except ImportError:
+    _PLOTLY = False
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 0.  Global hyper-parameters
@@ -921,7 +933,8 @@ class DAIPAgent:
         if self._steps % self.target_upd == 0:
             self.efe_target.load_state_dict(self.efe_net.state_dict())
 
-        return {'loss': efe_loss.item(), 'trans_loss': trans_loss.item()}
+        return {'loss': efe_loss.item(), 'trans_loss': trans_loss.item(),
+                'epist': epist.mean().item()}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -991,20 +1004,39 @@ class EpisodeStats:
     # training losses (averaged over all gradient steps in the episode)
     mean_loss:       float = 0.0
     mean_trans_loss: float = 0.0  # DAI-P only
+    mean_epist:      float = 0.0  # DAI-P only; mean batch epistemic gain
+    # per-step data for space visualisation (populated only when collect_vis=True)
+    step_rewards:  List[float] = field(default_factory=list)
+    input_points:  List        = field(default_factory=list)  # (N, 2) raw inputs
+    hidden_vecs:   List        = field(default_factory=list)  # (N, d_h) encoder outputs
+    gt_labels:     List[str]   = field(default_factory=list)
+    pred_labels:   List[str]   = field(default_factory=list)
 
 
-def run_episode(agent, env: SyntheticLIONEnv, train: bool = True) -> EpisodeStats:
+def run_episode(agent, env: SyntheticLIONEnv, train: bool = True,
+                collect_vis: bool = False) -> EpisodeStats:
     state = env.reset()
     stats = EpisodeStats()
-    losses, trans_losses = [], []
+    losses, trans_losses, epist_vals = [], [], []
 
     while True:
+        # Capture current flow before step() mutates it (loads next flow)
+        if collect_vis:
+            f = env._flow
+            stats.input_points.append(f['x'].copy())
+            stats.hidden_vecs.append(f['h'].squeeze(0).detach().cpu().numpy())
+            stats.gt_labels.append(_flow_gt_label(f, env.dg))
+            stats.pred_labels.append(_flow_pred_label(f))
+
         action = agent.act(state, env) if isinstance(agent, BreakEvenAgent) \
                  else agent.act(state)
 
         prev_labels = list(env.labels_bought)
         next_state, reward, done, info = env.step(action)
         stats.total_reward += reward
+
+        if collect_vis:
+            stats.step_rewards.append(reward)
 
         # Record label-purchase events (step index inside episode)
         for uid, (before, after) in enumerate(zip(prev_labels, info['labels'])):
@@ -1017,6 +1049,7 @@ def run_episode(agent, env: SyntheticLIONEnv, train: bool = True) -> EpisodeStat
             if loss_info:
                 if 'loss'       in loss_info: losses.append(loss_info['loss'])
                 if 'trans_loss' in loss_info: trans_losses.append(loss_info['trans_loss'])
+                if 'epist'      in loss_info: epist_vals.append(loss_info['epist'])
 
         state = next_state
         if done:
@@ -1027,9 +1060,86 @@ def run_episode(agent, env: SyntheticLIONEnv, train: bool = True) -> EpisodeStat
             stats.budget_final    = info['budget']
             stats.mean_loss       = float(np.mean(losses))       if losses       else 0.0
             stats.mean_trans_loss = float(np.mean(trans_losses)) if trans_losses else 0.0
+            stats.mean_epist      = float(np.mean(epist_vals))   if epist_vals   else 0.0
             break
 
     return stats
+
+
+def _flow_gt_label(flow: dict, dg: DataGenerator) -> str:
+    """Human-readable ground-truth class name from a cached flow dict."""
+    if flow['is_known']:
+        k = flow['class_id']
+        return f'K{k}({dg.KNOWN_TYPES[k][:3]})'
+    uid = flow['unknown_id']
+    return dg.UNKNOWN_NAMES[uid]
+
+
+def _flow_pred_label(flow: dict) -> str:
+    """Label assigned by the inference module (known class or unknown cluster)."""
+    if not flow['is_anom']:
+        return f'known_{flow["pred_k"]}'
+    return f'unk_c{flow["cid"]}'
+
+
+def _project_to_2d(vectors_np: np.ndarray, seed: int = 42) -> Optional[np.ndarray]:
+    """Robust PCA projection to 2D, mirroring TigerReporter.project_to_2d."""
+    if not _SKLEARN or vectors_np.shape[1] < 2:
+        return None
+    if vectors_np.shape[1] == 2:
+        return vectors_np
+    min_dim = min(vectors_np.shape[0], vectors_np.shape[1])
+    solver  = 'randomized' if min_dim > 2 else 'full'
+    try:
+        return _PCA(n_components=2, svd_solver=solver,
+                    random_state=seed, copy=False).fit_transform(vectors_np)
+    except Exception:
+        try:
+            return _PCA(n_components=2, svd_solver='full',
+                        copy=False).fit_transform(vectors_np)
+        except Exception:
+            return None
+
+
+def _space_scatter_figs(stats: EpisodeStats, seed: int) -> dict:
+    """
+    Build Plotly scatter figures for input space and hidden space.
+    Input space is already 2-D so no PCA is needed.
+    Hidden space (d_h-D) is projected to 2-D via PCA.
+    Returns a dict ready to pass to wandb.log().
+    """
+    if not _PLOTLY or not stats.input_points:
+        return {}
+
+    inp = np.array(stats.input_points)          # (N, 2)
+    hid = np.stack(stats.hidden_vecs)           # (N, d_h)
+    gt  = stats.gt_labels
+    pr  = stats.pred_labels
+    figs: dict = {}
+
+    # ── input space (no PCA — raw 2-D Gaussians) ────────────────────────────
+    for labels, tag in [(gt, 'gt'), (pr, 'pred')]:
+        fig = _px.scatter(
+            x=inp[:, 0], y=inp[:, 1], color=labels,
+            labels={'x': 'x₁', 'y': 'x₂', 'color': 'Label'},
+            title=f'Input space – {tag}',
+        )
+        fig.update_traces(marker=dict(size=7, opacity=0.65))
+        figs[f'InputSpace/{tag}'] = fig
+
+    # ── hidden space (PCA → 2-D) ─────────────────────────────────────────────
+    hid2 = _project_to_2d(hid, seed=seed)
+    if hid2 is not None:
+        for labels, tag in [(gt, 'gt'), (pr, 'pred')]:
+            fig = _px.scatter(
+                x=hid2[:, 0], y=hid2[:, 1], color=labels,
+                labels={'x': 'PC1', 'y': 'PC2', 'color': 'Label'},
+                title=f'Hidden space – {tag}',
+            )
+            fig.update_traces(marker=dict(size=7, opacity=0.65))
+            figs[f'HiddenSpace/{tag}'] = fig
+
+    return figs
 
 
 def smooth(xs: List[float], w: int = 15) -> List[float]:
@@ -1095,7 +1205,8 @@ def _run_one(task: dict) -> dict:
     ep_rewards, ep_wins, ep_labels, ep_labelA, ep_budget = [], [], [], [], []
 
     for ep in range(n_episodes):
-        stats = run_episode(agent, env, train=True)
+        at_log = log_interval > 0 and (ep + 1) % log_interval == 0
+        stats = run_episode(agent, env, train=True, collect_vis=at_log and wlog.active)
         ep_rewards.append(stats.total_reward)
         ep_wins.append(int(stats.win))
         ep_labels.append(stats.n_labels)
@@ -1108,7 +1219,7 @@ def _run_one(task: dict) -> dict:
                     f'→ uid={uid} ({dg.UNKNOWN_NAMES[uid]}/{dg.UNKNOWN_TYPES[uid]}) '
                     f'step={step_idx:3d}  budget={stats.budget_final:.2f}', flush=True)
 
-        if log_interval > 0 and (ep + 1) % log_interval == 0:
+        if at_log:
             w  = log_interval
             sl = slice(max(0, ep + 1 - w), ep + 1)
             line = (f'    [ep {ep+1:4d}] {agent_name:10s} seed={seed} '
@@ -1118,6 +1229,7 @@ def _run_one(task: dict) -> dict:
                     f'loss={stats.mean_loss:.4f}')
             if agent_name == 'DAI-P':
                 line += f'  tloss={stats.mean_trans_loss:.4f}'
+                line += f'  epist={stats.mean_epist:.4f}'
             print(line, flush=True)
 
         wm = dict(reward=stats.total_reward, win=int(stats.win),
@@ -1126,6 +1238,11 @@ def _run_one(task: dict) -> dict:
                   loss=stats.mean_loss)
         if agent_name == 'DAI-P':
             wm['trans_loss'] = stats.mean_trans_loss
+            wm['epist_gain'] = stats.mean_epist
+
+        if at_log and wlog.active:
+            wm.update(_space_scatter_figs(stats, seed))
+
         wlog.log(wm, step=ep)
 
     if verbose:
