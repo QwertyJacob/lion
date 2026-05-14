@@ -6,23 +6,34 @@ on a 2-D Gaussian CTI curriculum-learning task.
 Self-contained: no smartville imports.  Run with:
     python synthetic_lion.py [--episodes 300] [--seeds 5] [--no-plot]
 
+Multi-GPU / parallel execution
+-------------------------------
+    python synthetic_lion.py --gpus 0,1,2,3          # 4 GPUs, 1 worker each
+    python synthetic_lion.py --gpus auto              # all GPUs with ≥10 GB free
+    python synthetic_lion.py --gpus 0 --workers-per-gpu 4   # 4 workers on GPU 0
+    python synthetic_lion.py --gpus auto --min-free-gpu-gb 20
+
+Each (seed × agent) pair runs as an independent subprocess on the assigned GPU.
+Pretraining happens in the main process (fast) and the state dict is serialised
+to each worker via pickle.
+
 Weights & Biases logging
 -------------------------
     echo "WANDB_API_KEY=<your_key>" > .env
     python synthetic_lion.py --wandb-project synthetic-lion [--wandb-entity <team>]
 
-The script creates one W&B run per (seed × agent) so the UI can aggregate
-statistics across seeds with its built-in grouping feature.
+One W&B run is created per (seed × agent) under a shared group tag so the UI
+can aggregate statistics across seeds.
 
 Why DAI-P should beat DDQN here
 ---------------------------------
 Unknown class A (malicious) overlaps in 2-D with Known Benign 0, so the
 inference module initially classifies A-type flows as benign with HIGH
 confidence (low anomaly score).  The agent therefore accepts them and bleeds
-budget.  Once label-A is purchased, the inference module immediately adds
-A's prototype to its known-class roster: A-type flows flip from
-"high-confidence benign" to "high-confidence malicious A", producing the
-LARGEST possible one-step change in the proprioceptive state
+budget.  Once label-A is purchased, the inference module immediately adds A's
+prototype to its known-class roster: A-type flows flip from "high-confidence
+benign" to "high-confidence malicious A", producing the LARGEST possible
+one-step change in the proprioceptive state
 (known-class confidence, anomaly score, n_labels_bought, budget).
 Because this transition is maximally surprising, the DAI-P transition model
 carries a high residual prediction error—high perceptive-epistemic gain—for
@@ -35,7 +46,16 @@ eventually converge, but it loses critical budget in the early episodes.
 The Break-Even agent buys the label with the HIGHEST anomaly score first
 (the natural heuristic).  Unknown A has the LOWEST anomaly score (it looks
 benign), so the Break-Even agent consistently de-prioritises it—buying B or
-C first—and suffers the same budget haemorrhage as naive DDQN.
+C first—and suffers the same budget haemorrhage as naive DDQN
+
+The epistemic gain is NOT foreknowledge — it is learned across episodes.
+The first time the agent happens to buy label A (via Boltzmann exploration),
+the transition network fails to predict the ensuing proprioceptive flip and
+incurs a large MSE.  This error augments the EFE target for buy-label-A,
+raising its intrinsic value.  Subsequent episodes make the agent more likely
+to repeat the purchase, generating more confirmatory replay data.  The signal
+is immediate (one-step MSE) rather than delayed (downstream reward), which is
+why DAI-P learns the priority of label-A faster than DDQN.
 
 Architecture overview
 ---------------------
@@ -43,16 +63,19 @@ Architecture overview
     InferenceModule    prototypical classifier + soft anomaly/cluster head
                        updates online via EMA; label buying adds a prototype
     SyntheticLIONEnv   budget episode (block=0 / accept=1 / buy-label=2)
-    TwoStreamNet       shared backbone for Q-net / EFE-net  (5 extero + 6 proprio)
-    TransitionNet      predicts next proprioceptive state from (state, action)
+    TwoStreamNet       shared backbone for Q-net / EFE-net  (5 extero + 9 proprio)
+    TransitionNet      predicts next proprioceptive state (9-D) from (state, action)
     DDQNAgent          Double-DQN with Boltzmann sampling (no epistemic gain)
-    DAIPAgent          DAI-P: reward + perceptive-epistemic gain from transition MSE
+    DAIPAgent          DAI-P: reward + epistemic gain from transition MSE
     BreakEvenAgent     rule-based: buy highest-anomaly-score unlabelled cluster when affordable
 """
 
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
+import itertools
+import multiprocessing
 import os
 import pathlib
 import random
@@ -68,8 +91,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-# Populated in main() from --device arg; referenced by all classes via CFG.
-_DEVICE: torch.device = torch.device('cpu')
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 0.  Global hyper-parameters
@@ -142,15 +163,11 @@ CFG = dict(
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 0b. .env loader + W&B helper
+# 0b.  .env loader, GPU helpers, W&B wrapper
 # ──────────────────────────────────────────────────────────────────────────────
 
 def load_dotenv(path: str = '.env') -> None:
-    """
-    Minimal .env parser — no python-dotenv dependency required.
-    Supports KEY=value, KEY="value", KEY='value'.  Ignores comments and blanks.
-    Only sets variables that are not already present in the environment.
-    """
+    """Minimal .env parser — no python-dotenv dependency required."""
     p = pathlib.Path(path)
     if not p.exists():
         return
@@ -165,13 +182,40 @@ def load_dotenv(path: str = '.env') -> None:
             os.environ[k] = v
 
 
+def _available_gpus(min_free_gb: float = 10.0) -> List[str]:
+    """Return cuda:N ids for GPUs with at least min_free_gb of free VRAM."""
+    if not torch.cuda.is_available():
+        return ['cpu']
+    found = []
+    for i in range(torch.cuda.device_count()):
+        try:
+            free_b, _ = torch.cuda.mem_get_info(i)
+            if free_b / 1e9 >= min_free_gb:
+                found.append(f'cuda:{i}')
+        except Exception:
+            pass
+    return found if found else ['cpu']
+
+
+def _parse_gpus(gpus_arg: str, min_free_gb: float) -> List[str]:
+    if gpus_arg == 'auto':
+        found = _available_gpus(min_free_gb)
+        print(f'  [auto-GPU] free GPUs (≥{min_free_gb:.0f} GB): {found}')
+        return found
+    if gpus_arg.lower() == 'cpu':
+        return ['cpu']
+    out = []
+    for g in gpus_arg.split(','):
+        g = g.strip()
+        out.append(f'cuda:{g}' if not g.startswith('cuda') else g)
+    return out
+
+
 class _WandbLogger:
     """
-    Thread-safe optional wrapper around wandb.
-
-    Creates one W&B run per (seed, agent_name) under a shared `group` so
-    the W&B UI can aggregate statistics across seeds automatically.
-    Falls back to a no-op if wandb is not installed or WANDB_API_KEY is absent.
+    Optional wandb wrapper.  Creates one run per (seed × agent) under a
+    shared group tag so the W&B UI can aggregate across seeds automatically.
+    Falls back to a no-op when wandb is absent or WANDB_API_KEY is missing.
     """
 
     def __init__(self, project: Optional[str], entity: Optional[str],
@@ -179,30 +223,23 @@ class _WandbLogger:
         self._run = None
         if project is None:
             return
-
         api_key = os.environ.get('WANDB_API_KEY', '')
         if not api_key:
-            print('[wandb] WANDB_API_KEY not set — logging disabled. '
-                  'Add it to your .env file or environment.')
+            print('[wandb] WANDB_API_KEY not set — logging disabled.')
             return
-
         try:
             import wandb as _w
             self._w = _w
             self._run = _w.init(
-                project=project,
-                entity=entity or None,
-                group=group,
-                job_type=agent_name,
+                project=project, entity=entity or None,
+                group=group, job_type=agent_name,
                 name=f'{agent_name}_seed{seed}',
                 config={**cfg, 'seed': seed, 'agent': agent_name},
                 reinit=True,
             )
         except ImportError:
-            print('[wandb] package not installed — logging disabled. '
-                  'Run: pip install wandb')
+            print('[wandb] not installed — run: pip install wandb')
 
-    # ------------------------------------------------------------------
     def log(self, metrics: dict, step: int) -> None:
         if self._run is not None:
             self._w.log(metrics, step=step)
@@ -211,15 +248,6 @@ class _WandbLogger:
         if self._run is not None:
             for k, v in metrics.items():
                 self._run.summary[k] = v
-
-    def log_artifact(self, path: str, name: str, atype: str = 'result') -> None:
-        if self._run is not None:
-            try:
-                art = self._w.Artifact(name, type=atype)
-                art.add_file(str(path))
-                self._run.log_artifact(art)
-            except Exception as exc:
-                print(f'[wandb] artifact upload failed: {exc}')
 
     def finish(self) -> None:
         if self._run is not None:
@@ -239,16 +267,16 @@ class DataGenerator:
     """
     Seven 2-D Gaussians:
 
-    Known (pre-trained):
-      K0 – benign,    centre (−2, 0),   σ=0.40
-      K1 – benign,    centre ( 2, 0),   σ=0.40
-      K2 – malicious, centre ( 0,−2),   σ=0.40
+    Known (pretrained):
+      K0 – benign,    centre (−2,  0),  σ=0.40
+      K1 – benign,    centre ( 2,  0),  σ=0.40
+      K2 – malicious, centre ( 0, −2),  σ=0.40
 
     Unknown (label must be bought):
-      UA – malicious, centre (−1.5, 0.4), σ=0.35  ← overlaps K0!  HIGHEST epistemic value
-      UB – malicious, centre ( 0,   3.0), σ=0.45  ← clearly anomalous
-      UC – benign,    centre ( 4.0, 1.0), σ=0.45  ← clearly anomalous, false-positive risk
-      UD – benign,    centre ( 2.4,−1.0), σ=0.35  ← near K2, misclassified-malicious risk
+      UA – malicious, centre (−1.5,  0.4), σ=0.35  ← overlaps K0; highest epistemic value
+      UB – malicious, centre ( 0.0,  3.0), σ=0.45  ← clearly anomalous
+      UC – benign,    centre ( 4.0,  1.0), σ=0.45  ← clearly anomalous, false-positive risk
+      UD – benign,    centre ( 2.4, −1.0), σ=0.35  ← near K2, misclassified-malicious risk
     """
     N_KNOWN   = 3
     N_UNKNOWN = 4
@@ -260,7 +288,6 @@ class DataGenerator:
     UNKNOWN_MEANS = np.array([[-1.5,  0.4], [ 0.0,  3.0], [ 4.0,  1.0], [ 2.4, -1.0]])
     UNKNOWN_STDS  = [0.35, 0.45, 0.45, 0.35]
     UNKNOWN_TYPES = ['malicious', 'malicious', 'benign', 'benign']
-    # Readable names for logging
     UNKNOWN_NAMES = ['A(mal,overlap)', 'B(mal,sep)', 'C(ben,sep)', 'D(ben,nearmal)']
 
     def __init__(self, seed: Optional[int] = None):
@@ -298,14 +325,14 @@ class DataGenerator:
 
 class InferenceModule(nn.Module):
     """
-    Prototypical classifier with a differentiable soft-anomaly / cluster head.
+    Prototypical classifier + differentiable soft-anomaly / cluster head.
 
     Known prototypes are supervised (pretrained).  When a CTI label is bought
-    for unknown cluster uid, that cluster's EMA prototype is added to the
+    for unknown cluster uid, that cluster's EMA prototype is promoted to the
     known-prototype list so future flows are immediately classified correctly.
 
-    Unknown cluster prototypes are maintained as EMA buffers (no backprop
-    needed for them); the encoder IS trained during pretraining.
+    Unknown cluster prototypes are EMA buffers (no backprop).
+    The encoder is trained during pretraining via prototypical loss.
 
     Anomaly detection: a flow is anomalous if its L2 distance to the nearest
     known prototype exceeds `anomaly_threshold` in hidden space.
@@ -345,7 +372,6 @@ class InferenceModule(nn.Module):
 
         self.to(self.device)
 
-    # ------------------------------------------------------------------
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() == 1:
             x = x.unsqueeze(0)
@@ -428,11 +454,9 @@ class InferenceModule(nn.Module):
         pred_k, conf_k, dists_k = self.known_classify(h)
         anorm_score, is_anom     = self.anomaly_detect(dists_k)
         cid, cconf, cweights     = self.unk_cluster(h)
-        return dict(
-            h=h, pred_k=pred_k, conf_k=conf_k, dists_k=dists_k,
-            anorm_score=anorm_score, is_anom=is_anom,
-            cid=cid, cconf=cconf, cweights=cweights,
-        )
+        return dict(h=h, pred_k=pred_k, conf_k=conf_k, dists_k=dists_k,
+                    anorm_score=anorm_score, is_anom=is_anom,
+                    cid=cid, cconf=cconf, cweights=cweights)
 
 
 def pretrain_inference(inf: InferenceModule, dg: DataGenerator, cfg: dict) -> float:
@@ -444,7 +468,7 @@ def pretrain_inference(inf: InferenceModule, dg: DataGenerator, cfg: dict) -> fl
     y = torch.tensor(y_np, dtype=torch.long,    device=inf.device)
     final_loss = float('nan')
     for _ in range(cfg['pretrain_epochs']):
-        perm = torch.randperm(len(X))
+        perm = torch.randperm(len(X), device=inf.device)
         X, y = X[perm], y[perm]
         h = inf.encode(X)
         _, _, dists = inf.known_classify(h)
@@ -462,30 +486,42 @@ def pretrain_inference(inf: InferenceModule, dg: DataGenerator, cfg: dict) -> fl
 # 3.  Environment
 # ──────────────────────────────────────────────────────────────────────────────
 
-# State layout: [extero(5), proprio(6)] = 11-D total
-#   extero:  known_pred_norm, known_conf, anorm_score_norm, unk_proto_x_norm, unk_proto_y_norm
-#   proprio: unk_cluster_conf, n_labels_bought_frac, budget_frac, label_price_frac,
-#            time_frac, known_conf_again  (second known_conf useful for transition net)
-STATE_DIM   = 11
-PROPRIO_DIM = 6
+# State layout: [extero(5), proprio(9)] = 14-D total
+#
+#   extero  (5): known_pred_norm, known_conf, anorm_score_norm,
+#                unk_proto_x_norm, unk_proto_y_norm
+#
+#   proprio (9): conf_unk_0, conf_unk_1, conf_unk_2, conf_unk_3,
+#                n_labels_bought_frac, budget_frac, label_price_frac,
+#                time_frac, known_conf_norm
+#
+# Four per-cluster confidences (EMA).  
+# The transition network can cleanly learn that buying
+# label-A drives conf_unk_0 to 0 while leaving the other three unchanged —
+# the sharpest signal of the episode's epistemic structure.
+
+STATE_DIM   = 14
+PROPRIO_DIM = 9
 ACTION_SIZE = 3   # 0=block, 1=accept, 2=buy-label
 
 
 class SyntheticLIONEnv:
     """
-    Episode environment.
+    Budget episode environment.
 
-    Each step one flow is sampled uniformly from all 7 classes, the inference
-    module classifies/clusters it, and the agent chooses one of 3 actions.
+    Each step: one flow is sampled, the inference module classifies/clusters
+    it, and the agent picks block / accept / buy-label.
 
-    A key subtlety: when the agent buys a label for unknown cluster uid,
-    the cluster's current EMA prototype is immediately promoted to a
-    known prototype.  This creates a LARGE one-step change in the
-    proprioceptive state: the known-class confidence and anomaly score of
-    future flows from that cluster flip dramatically.  The DAI-P transition
-    model's prediction error peaks for this transition, contributing high
-    perceptive-epistemic gain and directing the agent to explore label
-    purchases for the most confusing/surprising clusters first.
+    When a CTI label is bought for unknown cluster uid:
+      1. The cluster's EMA prototype is promoted to the known-proto list.
+      2. unk_conf[uid] is zeroed (cluster is resolved; no longer uncertain).
+      3. Future flows from that cluster are immediately classified correctly.
+
+    This produces the LARGEST one-step proprioceptive state change for
+    cluster A specifically — all four per-cluster confidences shift, but
+    conf_unk_0 flips from a settled EMA value to 0 — giving the transition
+    network its sharpest prediction failure and thus the highest epistemic
+    gain for the buy-label-A action.
     """
 
     def __init__(self, data_gen: DataGenerator, inf_mod: InferenceModule, cfg: dict):
@@ -499,7 +535,6 @@ class SyntheticLIONEnv:
         # Store pretrained known-proto count for episode reset
         self._pretrained_n_known = inf_mod.known_protos.shape[0]
 
-    # ------------------------------------------------------------------
     def reset(self) -> torch.Tensor:
         self.budget        = self.cfg['init_budget']
         self.t             = 0
@@ -508,41 +543,32 @@ class SyntheticLIONEnv:
         self._step_flow()
         return self._state()
 
-    # ------------------------------------------------------------------
     def _step_flow(self):
         """Sample next flow and run inference.  Caches result."""
         x, cid, is_k, uid, ctype = self.dg.sample()
         xt = torch.tensor(x, dtype=torch.float32, device=self.device).unsqueeze(0)
         with torch.no_grad():
             r = self.inf(xt)
-
         self._flow = dict(
-            x=x, class_id=cid, is_known=is_k,
-            unknown_id=uid, class_type=ctype,
+            x=x, class_id=cid, is_known=is_k, unknown_id=uid, class_type=ctype,
             h=r['h'],
-            pred_k=r['pred_k'].item(),
-            conf_k=r['conf_k'].item(),
-            anorm_score=r['anorm_score'].item(),
-            is_anom=r['is_anom'].item(),
-            cid=r['cid'].item() if uid is not None else -1,
+            pred_k=r['pred_k'].item(), conf_k=r['conf_k'].item(),
+            anorm_score=r['anorm_score'].item(), is_anom=r['is_anom'].item(),
+            cid=r['cid'].item()   if uid is not None else -1,
             cconf=r['cconf'].item() if uid is not None else r['conf_k'].item(),
         )
         if uid is not None:
-            cid_t = r['cid']
-            self.inf.update_unk_proto(r['h'], cid_t.item(), self.cfg['proto_ema'])
-            self.inf.update_unk_conf(cid_t.item(), r['cconf'].item())
+            self.inf.update_unk_proto(r['h'], r['cid'].item(), self.cfg['proto_ema'])
+            self.inf.update_unk_conf(r['cid'].item(), r['cconf'].item())
 
-    # ------------------------------------------------------------------
     def _state(self) -> torch.Tensor:
         f   = self._flow
         cfg = self.cfg
-        n_u = self.n_unk
 
-        # Exteroceptive
+        # Exteroceptive (5)
         known_pred_norm = f['pred_k'] / max(self.inf.known_protos.shape[0] - 1, 1)
         known_conf_norm = f['conf_k']
         anorm_norm      = min(f['anorm_score'] / 5.0, 1.0)
-
         if f['unknown_id'] is not None:
             up = self.inf.unk_protos[f['cid']].detach().cpu().numpy()
         else:
@@ -550,32 +576,32 @@ class SyntheticLIONEnv:
         proto_x = float(up[0]) / 5.0
         proto_y = float(up[1]) / 5.0
 
-        # Proprioceptive
-        unk_cconf     = f['cconf']
-        n_labels_frac = sum(self.labels_bought) / n_u
+        # Proprioceptive (9): 4 per-cluster EMA confidences + 5 scalars
+        # Zeroed for clusters whose label has already been bought (resolved).
+        conf_per_cluster = [
+            0.0 if self.labels_bought[u]
+            else float(self.inf.unk_conf[u].item())
+            for u in range(self.n_unk)
+        ]
+        n_labels_frac = sum(self.labels_bought) / self.n_unk
         budget_frac   = self.budget / cfg['init_budget']
         uid           = f['unknown_id']
-        if uid is not None and not self.labels_bought[uid]:
-            price_frac = self.prices[uid] / cfg['init_budget']
-        else:
-            price_frac = 0.0
-        time_frac = self.t / cfg['max_steps']
+        price_frac    = (self.prices[uid] / cfg['init_budget']
+                         if uid is not None and not self.labels_bought[uid] else 0.0)
+        time_frac     = self.t / cfg['max_steps']
 
         extero  = [known_pred_norm, known_conf_norm, anorm_norm, proto_x, proto_y]
-        proprio = [unk_cconf, n_labels_frac, budget_frac, price_frac, time_frac, known_conf_norm]
-
+        proprio = conf_per_cluster + [n_labels_frac, budget_frac, price_frac,
+                                       time_frac, known_conf_norm]
         return torch.tensor(extero + proprio, dtype=torch.float32, device=self.device)
 
-    # ------------------------------------------------------------------
     def step(self, action: int) -> Tuple[torch.Tensor, float, bool, dict]:
         f   = self._flow
         cfg = self.cfg
         uid = f['unknown_id']
-
         reward = 0.0
 
-        # ── Action 2: buy label ──────────────────────────────────────
-        if action == 2:
+        if action == 2:                         # ── buy label ──
             if f['is_known'] or uid is None or self.labels_bought[uid]:
                 reward = cfg['buy_invalid_penalty']
             elif self.budget < self.prices[uid]:
@@ -585,13 +611,11 @@ class SyntheticLIONEnv:
                 reward = -price * 0.05          # tiny immediate cost signal
                 self.budget -= price
                 self.labels_bought[uid] = True
-                self.inf.add_known_proto(
-                    self.inf.unk_protos[uid],
-                    self.dg.UNKNOWN_TYPES[uid]
-                )
+                self.inf.add_known_proto(self.inf.unk_protos[uid],
+                                         self.dg.UNKNOWN_TYPES[uid])
+                self.inf.unk_conf[uid] = 0.0   # cluster resolved; zero its proprio slot
 
-        # ── Action 0: block ──────────────────────────────────────────
-        elif action == 0:
+        elif action == 0:                       # ── block ──
             if f['is_known']:
                 ctype  = self.inf.known_types_list[f['pred_k']]
                 reward = (cfg['r_block_malicious_informed'] if ctype == 'malicious'
@@ -601,11 +625,9 @@ class SyntheticLIONEnv:
                 reward = (cfg['r_block_malicious_informed'] if ctype == 'malicious'
                           else cfg['r_block_benign_informed'])
             else:
-                key    = f'r_block_{self.dg.UNKNOWN_NAMES[uid][0]}_uninformed'
-                reward = cfg.get(key, 0.5)
+                reward = cfg.get(f'r_block_{self.dg.UNKNOWN_NAMES[uid][0]}_uninformed', 0.5)
 
-        # ── Action 1: accept ─────────────────────────────────────────
-        elif action == 1:
+        elif action == 1:                       # ── accept ──
             if f['is_known']:
                 ctype  = self.inf.known_types_list[f['pred_k']]
                 reward = (cfg['r_accept_benign_informed'] if ctype == 'benign'
@@ -615,31 +637,20 @@ class SyntheticLIONEnv:
                 reward = (cfg['r_accept_benign_informed'] if ctype == 'benign'
                           else cfg['r_accept_malicious_informed'])
             else:
-                key    = f'r_accept_{self.dg.UNKNOWN_NAMES[uid][0]}_uninformed'
-                reward = cfg.get(key, -1.0)
+                reward = cfg.get(f'r_accept_{self.dg.UNKNOWN_NAMES[uid][0]}_uninformed', -1.0)
 
         self.budget += reward
         self.t      += 1
-
-        done = (
-            self.budget <= cfg['min_budget']
-            or self.budget >= cfg['max_budget']
-            or self.t     >= cfg['max_steps']
-        )
-        win = self.budget >= cfg['max_budget']
-
+        done = (self.budget <= cfg['min_budget']
+                or self.budget >= cfg['max_budget']
+                or self.t     >= cfg['max_steps'])
+        win  = self.budget >= cfg['max_budget']
         self.budget = max(cfg['min_budget'], min(self.budget, cfg['max_budget'] + 5.0))
-
         if not done:
             self._step_flow()
-
-        info = dict(
-            budget   = self.budget,
-            win      = win,
-            labels   = list(self.labels_bought),
-            n_labels = sum(self.labels_bought),
-            reward   = reward,
-        )
+        info = dict(budget=self.budget, win=win,
+                    labels=list(self.labels_bought), n_labels=sum(self.labels_bought),
+                    reward=reward)
         return self._state(), reward, done, info
 
 
@@ -650,13 +661,13 @@ class SyntheticLIONEnv:
 class TwoStreamNet(nn.Module):
     """
     Shared backbone for DQN / EFE-net.
-    Input: state (STATE_DIM = 11) split into extero (5) and proprio (6).
-    Output: logits for each action (ACTION_SIZE = 3).
+    Input: state (STATE_DIM=14) split into extero (5) and proprio (9).
+    Output: action logits (ACTION_SIZE=3).
     """
     def __init__(self, out_dim: int = ACTION_SIZE, hidden: int = 48):
         super().__init__()
         extero_dim  = STATE_DIM - PROPRIO_DIM   # 5
-        proprio_dim = PROPRIO_DIM               # 6
+        proprio_dim = PROPRIO_DIM               # 9
 
         self.ext_fc1 = nn.Linear(extero_dim,  hidden)
         self.ext_fc2 = nn.Linear(hidden,      hidden // 2)
@@ -680,18 +691,22 @@ class TwoStreamNet(nn.Module):
 
 class TransitionNet(nn.Module):
     """
-    Predicts the next PROPRIOCEPTIVE state given (state, action-one-hot).
-    Used only by DAI-P.
+    Predicts the next PROPRIOCEPTIVE state (9-D) given (state, action-one-hot).
+
+    With four per-cluster confidence slots in proprio, the transition net can
+    learn clean cluster-specific update rules:
+      - buy-label-A  → conf_unk_0 → 0, others unchanged
+      - accept A-flow → conf_unk_0 updates via EMA, others unchanged
+    This sharpens the epistemic gain signal for the buy-label-A action.
     """
     def __init__(self, hidden: int = 48):
         super().__init__()
-        in_dim = STATE_DIM + ACTION_SIZE
         self.net = nn.Sequential(
-            nn.Linear(in_dim,  hidden),
+            nn.Linear(STATE_DIM + ACTION_SIZE, hidden),
             nn.ReLU(),
-            nn.Linear(hidden,  hidden),
+            nn.Linear(hidden, hidden),
             nn.ReLU(),
-            nn.Linear(hidden,  PROPRIO_DIM),
+            nn.Linear(hidden, PROPRIO_DIM),
         )
 
     def forward(self, state: torch.Tensor, action_oh: torch.Tensor) -> torch.Tensor:
@@ -728,10 +743,7 @@ class ReplayBuffer:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class DDQNAgent:
-    """
-    Double-DQN with Boltzmann sampling (no epistemic gain).
-    Identical exploration mechanism to the DDQN baseline in the paper.
-    """
+    """Double-DQN with Boltzmann sampling.  No epistemic gain — pure reward."""
 
     def __init__(self, cfg: dict):
         self.gamma       = cfg['gamma']
@@ -756,8 +768,9 @@ class DDQNAgent:
         return torch.multinomial(probs, 1).item()
 
     def push(self, s, a, r, s2, done):
-        # Store on CPU to save GPU memory; moved to device at training time.
-        self.buf.push(s.cpu(), torch.tensor(a), torch.tensor(r, dtype=torch.float32),
+        # Store on CPU; moved to device at training time to save GPU memory.
+        self.buf.push(s.cpu(), torch.tensor(a),
+                      torch.tensor(r, dtype=torch.float32),
                       s2.cpu(), torch.tensor(done, dtype=torch.bool))
 
     def train_step(self) -> Optional[Dict[str, float]]:
@@ -788,29 +801,29 @@ class DDQNAgent:
         self._steps += 1
         if self._steps % self.target_upd == 0:
             self.target.load_state_dict(self.net.state_dict())
-
         return {'loss': loss.item()}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 7.  DAI-P agent  (perceptive-epistemic gain + pragmatic reward)
+# 7.  DAI-P agent
 # ──────────────────────────────────────────────────────────────────────────────
 
 class DAIPAgent:
     """
-    DAI-P: the canonical value-based Active Inference agent from the paper.
+    DAI-P: the canonical value-based Active Inference agent.
 
-    EFE target = reward  +  epistemic_weight * perceptive_epistemic_gain
-                         +  γ * EFE(s', a*)
+    EFE target = reward  +  epistemic_weight × epistemic_gain
+                         +  γ × EFE(s', a*)
 
-    Perceptive-epistemic gain = 0.5 * ||next_proprio - TransitionNet(s,a)||²
+    Epistemic gain = 0.5 × ||next_proprio − TransitionNet(s, a)||²
 
-    The transition net is trained concurrently (supervised MSE on proprio
-    next-state prediction).  Early in training its residual error is high for
-    buy-label-A because A-type flows flip dramatically from "high-conf benign"
-    to "high-conf malicious A" in the proprioceptive state—the most surprising
-    one-step transition in this environment—so the EFE objective assigns higher
-    intrinsic value to buy-label-A and purchases it earlier.
+    The transition network is trained concurrently on supervised next-proprio
+    prediction.  With four per-cluster confidence slots in the proprioceptive
+    state, the transition network learns that buying label-A zeroes conf_unk_0
+    while leaving the other slots intact — a clean, cluster-specific signal.
+    This failure to predict the post-buy state produces high epistemic gain,
+    driving the agent to prioritise label-A purchases before the reward signal
+    alone would justify it.
     """
 
     def __init__(self, cfg: dict):
@@ -842,8 +855,8 @@ class DAIPAgent:
         return torch.multinomial(probs, 1).item()
 
     def push(self, s, a, r, s2, done):
-        # Store on CPU to save GPU memory; moved to device at training time.
-        self.buf.push(s.cpu(), torch.tensor(a), torch.tensor(r, dtype=torch.float32),
+        self.buf.push(s.cpu(), torch.tensor(a),
+                      torch.tensor(r, dtype=torch.float32),
                       s2.cpu(), torch.tensor(done, dtype=torch.bool))
 
     def train_step(self) -> Optional[Dict[str, float]]:
@@ -860,12 +873,12 @@ class DAIPAgent:
 
         next_proprio = S2[:, STATE_DIM - PROPRIO_DIM:]
 
-        # ── 1. Compute perceptive epistemic gain ──────────────────────────────
+        # ── epistemic gain ────────────────────────────────────────────────────
         with torch.no_grad():
             pred_next = self.trans_net(S, AOH)
             epist     = 0.5 * ((next_proprio - pred_next) ** 2).sum(dim=1, keepdim=True)
 
-        # ── 2. Build EFE targets ──────────────────────────────────────────────
+        # ── EFE targets ───────────────────────────────────────────────────────
         with torch.no_grad():
             a_next      = self.efe_net(S2).argmax(1, keepdim=True)
             q_next      = self.efe_target(S2).gather(1, a_next)
@@ -876,17 +889,16 @@ class DAIPAgent:
                 + self.gamma * q_next.squeeze() * ~D.squeeze()
             )
 
-        # ── 3. Train EFE network ──────────────────────────────────────────────
+        # ── train EFE network ─────────────────────────────────────────────────
         self.efe_net.train()
         efe_loss = F.mse_loss(self.efe_net(S), efe_targets)
         self.efe_opt.zero_grad()
         efe_loss.backward()
         self.efe_opt.step()
 
-        # ── 4. Train transition network ───────────────────────────────────────
+        # ── train transition network ──────────────────────────────────────────
         self.trans_net.train()
-        pred_next2 = self.trans_net(S, AOH)
-        trans_loss = F.mse_loss(pred_next2, next_proprio)
+        trans_loss = F.mse_loss(self.trans_net(S, AOH), next_proprio)
         self.trans_opt.zero_grad()
         trans_loss.backward()
         self.trans_opt.step()
@@ -915,9 +927,9 @@ class BreakEvenAgent:
           • Otherwise block if anomaly score > 0.5, else accept.
 
     This heuristic is deliberate: Unknown-A (the most dangerous cluster) has
-    the LOWEST anomaly score because it overlaps with Known-Benign-0.
-    The break-even agent therefore buys B's label first (highest anomaly score),
-    then C or D (all cheaper), and reaches A last—if at all within budget.
+    the LOWEST anomaly score (overlaps K0), so it is always
+    de-prioritised.  B is bought first, then C or D.  A is reached last or
+    not at all — the A-flows keep draining budget the entire time.
     """
 
     def act(self, state: torch.Tensor, env: SyntheticLIONEnv) -> int:
@@ -931,43 +943,35 @@ class BreakEvenAgent:
         if uid is None:
             return 1
 
-        avail_uids = [i for i in range(env.n_unk) if not env.labels_bought[i]]
-        if avail_uids:
-            unk_anom_scores = {}
-            for i in avail_uids:
+        avail = [i for i in range(env.n_unk) if not env.labels_bought[i]]
+        if avail:
+            anom_scores = {}
+            for i in avail:
                 up = env.inf.unk_protos[i].unsqueeze(0)
                 with torch.no_grad():
-                    d = torch.cdist(up, env.inf.known_protos).min().item()
-                unk_anom_scores[i] = d
-            best_uid = max(unk_anom_scores, key=unk_anom_scores.__getitem__)
-            price    = env.prices[best_uid]
-            if uid == best_uid and env.budget >= price + 2.0:
+                    anom_scores[i] = torch.cdist(up, env.inf.known_protos).min().item()
+            best = max(anom_scores, key=anom_scores.__getitem__)
+            if uid == best and env.budget >= env.prices[best] + 2.0:
                 return 2
 
-        if f['anorm_score'] > env.cfg['anomaly_threshold'] * 0.8:
-            return 0
-        else:
-            return 1    # Accept — this is the trap for cluster A!
+        return 0 if f['anorm_score'] > env.cfg['anomaly_threshold'] * 0.8 else 1
 
-    def push(self, *args):
-        pass
-
-    def train_step(self) -> None:
-        return None
+    def push(self, *args): pass
+    def train_step(self) -> None: return None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 9.  Training loop helpers
+# 9.  Episode runner
 # ──────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class EpisodeStats:
-    total_reward:   float = 0.0
-    n_steps:        int   = 0
-    win:            bool  = False
-    n_labels:       int   = 0
-    labels:         List[bool]  = field(default_factory=lambda: [False] * 4)
-    budget_final:   float = 0.0
+    total_reward:    float = 0.0
+    n_steps:         int   = 0
+    win:             bool  = False
+    n_labels:        int   = 0
+    labels:          List[bool]            = field(default_factory=lambda: [False] * 4)
+    budget_final:    float = 0.0
     # label buy events: list of (step_idx, unknown_uid) tuples
     label_buy_steps: List[Tuple[int, int]] = field(default_factory=list)
     # training losses (averaged over all gradient steps in the episode)
@@ -981,13 +985,10 @@ def run_episode(agent, env: SyntheticLIONEnv, train: bool = True) -> EpisodeStat
     losses, trans_losses = [], []
 
     while True:
-        if isinstance(agent, BreakEvenAgent):
-            action = agent.act(state, env)
-        else:
-            action = agent.act(state)
+        action = agent.act(state, env) if isinstance(agent, BreakEvenAgent) \
+                 else agent.act(state)
 
         prev_labels = list(env.labels_bought)
-
         next_state, reward, done, info = env.step(action)
         stats.total_reward += reward
 
@@ -1005,12 +1006,12 @@ def run_episode(agent, env: SyntheticLIONEnv, train: bool = True) -> EpisodeStat
 
         state = next_state
         if done:
-            stats.n_steps        = env.t
-            stats.win            = info['win']
-            stats.n_labels       = info['n_labels']
-            stats.labels         = list(info['labels'])
-            stats.budget_final   = info['budget']
-            stats.mean_loss      = float(np.mean(losses))      if losses      else 0.0
+            stats.n_steps         = env.t
+            stats.win             = info['win']
+            stats.n_labels        = info['n_labels']
+            stats.labels          = list(info['labels'])
+            stats.budget_final    = info['budget']
+            stats.mean_loss       = float(np.mean(losses))       if losses       else 0.0
             stats.mean_trans_loss = float(np.mean(trans_losses)) if trans_losses else 0.0
             break
 
@@ -1026,46 +1027,130 @@ def smooth(xs: List[float], w: int = 15) -> List[float]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 10. Main experiment
+# 10. Agent factory
 # ──────────────────────────────────────────────────────────────────────────────
 
 AGENTS = ['DDQN', 'DAI-P', 'Break-Even']
 
 
 def make_agent(name: str, cfg: dict):
-    if name == 'DDQN':
-        return DDQNAgent(cfg)
-    elif name == 'DAI-P':
-        return DAIPAgent(cfg)
-    else:
-        return BreakEvenAgent()
+    if name == 'DDQN':      return DDQNAgent(cfg)
+    if name == 'DAI-P':     return DAIPAgent(cfg)
+    return BreakEvenAgent()
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 11. Per-(seed × agent) worker  — top-level so multiprocessing can pickle it
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _run_one(task: dict) -> dict:
+    """
+    Runs one (seed, agent_name) pair in its own process.
+    Receives the pretrained InferenceModule as a CPU state dict (picklable).
+    """
+    seed         = task['seed']
+    agent_name   = task['agent_name']
+    cfg          = task['cfg']            # already has 'device' set
+    n_episodes   = task['n_episodes']
+    log_interval = task['log_interval']
+    verbose      = task['verbose']
+    wandb_kw     = task['wandb_kw']
+    env_file     = task['env_file']
+
+    # Re-load .env in each subprocess (spawn doesn't inherit env mutations)
+    load_dotenv(env_file)
+
+    torch.manual_seed(seed + 1000 * AGENTS.index(agent_name))
+    random.seed(seed + 1000 * AGENTS.index(agent_name))
+    np.random.seed(seed + 1000 * AGENTS.index(agent_name))
+
+    device = torch.device(cfg['device'])
+
+    # Reconstruct inference module from serialised state dict
+    dg  = DataGenerator(seed=seed)
+    inf = InferenceModule(cfg)
+    inf.load_state_dict({k: v.to(device) for k, v in task['inf_state_dict'].items()})
+    inf.to(device)
+    inf.eval()
+
+    agent = make_agent(agent_name, cfg)
+    env   = SyntheticLIONEnv(dg, inf, cfg)
+
+    wlog = _WandbLogger(agent_name=agent_name, seed=seed, cfg=cfg, **wandb_kw)
+
+    ep_rewards, ep_wins, ep_labels, ep_labelA, ep_budget = [], [], [], [], []
+
+    for ep in range(n_episodes):
+        stats = run_episode(agent, env, train=True)
+        ep_rewards.append(stats.total_reward)
+        ep_wins.append(int(stats.win))
+        ep_labels.append(stats.n_labels)
+        ep_labelA.append(int(stats.labels[0]))
+        ep_budget.append(stats.budget_final)
+
+        for step_idx, uid in stats.label_buy_steps:
+            print(f'    [BUY] ep={ep:4d} seed={seed} {agent_name:10s} '
+                  f'→ uid={uid} ({dg.UNKNOWN_NAMES[uid]}/{dg.UNKNOWN_TYPES[uid]}) '
+                  f'step={step_idx:3d}  budget={stats.budget_final:.2f}', flush=True)
+
+        if log_interval > 0 and (ep + 1) % log_interval == 0:
+            w  = log_interval
+            sl = slice(max(0, ep + 1 - w), ep + 1)
+            line = (f'    [ep {ep+1:4d}] {agent_name:10s} seed={seed} '
+                    f'rew={np.mean(ep_rewards[sl]):+7.2f}  '
+                    f'win={np.mean(ep_wins[sl]):.2f}  '
+                    f'lA={np.mean(ep_labelA[sl]):.2f}  '
+                    f'loss={stats.mean_loss:.4f}')
+            if agent_name == 'DAI-P':
+                line += f'  tloss={stats.mean_trans_loss:.4f}'
+            print(line, flush=True)
+
+        wm = dict(reward=stats.total_reward, win=int(stats.win),
+                  n_labels=stats.n_labels, label_A=int(stats.labels[0]),
+                  budget_final=stats.budget_final, n_steps=stats.n_steps,
+                  loss=stats.mean_loss)
+        if agent_name == 'DAI-P':
+            wm['trans_loss'] = stats.mean_trans_loss
+        wlog.log(wm, step=ep)
+
+    if verbose:
+        late = slice(-50, None)
+        print(f'  {agent_name:10s}  '
+              f'mean_rew={np.mean(ep_rewards[late]):.2f}  '
+              f'win_rate={np.mean(ep_wins[late]):.2f}  '
+              f'label_A_rate={np.mean(ep_labelA[late]):.2f}  '
+              f'mean_labels={np.mean(ep_labels[late]):.2f}', flush=True)
+
+    for phase, sl in [('early', slice(0, 50)), ('late', slice(-50, None))]:
+        wlog.summary({
+            f'{phase}/mean_reward':  float(np.mean(ep_rewards[sl])),
+            f'{phase}/win_rate':     float(np.mean(ep_wins[sl])),
+            f'{phase}/label_A_rate': float(np.mean(ep_labelA[sl])),
+        })
+    wlog.finish()
+
+    return dict(seed=seed, agent=agent_name,
+                rewards=ep_rewards, wins=ep_wins,
+                n_labels=ep_labels, label_A=ep_labelA, budget=ep_budget)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 12. Experiment orchestrator
+# ──────────────────────────────────────────────────────────────────────────────
 
 def run_experiment(
     n_episodes:    int,
     seeds:         List[int],
     cfg:           dict,
+    gpus:          List[str],
+    workers_per_gpu: int,
     verbose:       bool = True,
     log_interval:  int  = 50,
     wandb_project: Optional[str] = None,
     wandb_entity:  Optional[str] = None,
     wandb_group:   Optional[str] = None,
+    env_file:      str  = '.env',
 ) -> dict:
-    """
-    Run all agents across all seeds.
-
-    Parameters
-    ----------
-    n_episodes    : episodes per (seed × agent)
-    seeds         : list of integer seeds
-    cfg           : hyperparameter dict
-    verbose       : print seed-level summaries
-    log_interval  : print per-agent running stats every N episodes (0 = off)
-    wandb_project : W&B project name; None disables W&B logging
-    wandb_entity  : W&B entity (team/user); None uses default
-    wandb_group   : W&B group tag shared across all runs in this experiment;
-                    auto-generated from timestamp if None
-    """
     results = {name: {'rewards': [], 'wins': [], 'n_labels': [],
                       'label_A': [], 'budget': []}
                for name in AGENTS}
@@ -1073,119 +1158,73 @@ def run_experiment(
     if wandb_group is None:
         wandb_group = f'synthetic-lion-{int(time.time())}'
 
+    # ── Pretraining: one per seed, in the main process ────────────────────────
+    # Use the first GPU for pretraining (fast; state dict serialised for workers)
+    pretrain_device = gpus[0]
+    pretrain_cfg    = {**cfg, 'device': pretrain_device}
+
+    pretrained: dict = {}
     for seed in seeds:
-        if verbose:
-            print(f'\n── Seed {seed} ──────────────────────────────────────────')
-
         dg  = DataGenerator(seed=seed)
-        inf = InferenceModule(cfg)
-
+        inf = InferenceModule(pretrain_cfg)
         torch.manual_seed(seed)
         np.random.seed(seed)
         random.seed(seed)
+        loss = pretrain_inference(inf, dg, pretrain_cfg)
+        # Serialise to CPU so workers can load it regardless of their device
+        pretrained[seed] = {k: v.cpu() for k, v in inf.state_dict().items()}
+        print(f'  Seed {seed}: pretraining done (loss={loss:.4f})')
 
-        pretrain_loss = pretrain_inference(inf, dg, cfg)
-        if verbose:
-            print(f'  Pretraining done  (final loss={pretrain_loss:.4f})')
+    # ── Build task list with round-robin GPU assignment ────────────────────────
+    slot_cycle = itertools.cycle(gpus * workers_per_gpu)
+    wandb_kw   = dict(project=wandb_project, entity=wandb_entity, group=wandb_group)
 
+    tasks = []
+    for seed in seeds:
         for agent_name in AGENTS:
-            agent_idx = AGENTS.index(agent_name)
-            torch.manual_seed(seed + 1000 * agent_idx)
-            random.seed(seed + 1000 * agent_idx)
-            np.random.seed(seed + 1000 * agent_idx)
+            device_str = next(slot_cycle)
+            tasks.append(dict(
+                seed         = seed,
+                agent_name   = agent_name,
+                cfg          = {**cfg, 'device': device_str},
+                n_episodes   = n_episodes,
+                log_interval = log_interval,
+                verbose      = verbose,
+                wandb_kw     = wandb_kw,
+                env_file     = env_file,
+                inf_state_dict = pretrained[seed],
+            ))
 
-            agent = make_agent(agent_name, cfg)
-            env   = SyntheticLIONEnv(dg, deepcopy(inf), cfg)
+    n_workers = len(gpus) * workers_per_gpu
+    print(f'\n  Dispatching {len(tasks)} jobs across {n_workers} worker(s) '
+          f'on: {gpus}  (×{workers_per_gpu} per GPU)')
+    for t in tasks:
+        print(f'    seed={t["seed"]}  {t["agent_name"]:10s}  → {t["cfg"]["device"]}')
+    print()
 
-            ep_rewards, ep_wins, ep_labels, ep_labelA, ep_budget = [], [], [], [], []
+    if n_workers == 1:
+        raw = [_run_one(t) for t in tasks]
+    else:
+        ctx = multiprocessing.get_context('spawn')
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=n_workers, mp_context=ctx
+        ) as pool:
+            futures = [pool.submit(_run_one, t) for t in tasks]
+            raw = [f.result() for f in futures]   # preserves submission order
 
-            wlog = _WandbLogger(
-                project    = wandb_project,
-                entity     = wandb_entity,
-                group      = wandb_group,
-                agent_name = agent_name,
-                seed       = seed,
-                cfg        = cfg,
-            )
-            if wlog.active:
-                print(f'  [wandb] run started: {agent_name} / seed {seed} '
-                      f'(group={wandb_group})')
-
-            for ep in range(n_episodes):
-                stats = run_episode(agent, env, train=True)
-                ep_rewards.append(stats.total_reward)
-                ep_wins.append(int(stats.win))
-                ep_labels.append(stats.n_labels)
-                ep_labelA.append(int(stats.labels[0]))
-                ep_budget.append(stats.budget_final)
-
-                # ── console: label-buy events ──────────────────────────────
-                for step_idx, uid in stats.label_buy_steps:
-                    uname = dg.UNKNOWN_NAMES[uid]
-                    utype = dg.UNKNOWN_TYPES[uid]
-                    print(f'    [BUY] ep={ep:4d} seed={seed} {agent_name:10s} '
-                          f'→ label uid={uid} ({uname}/{utype}) '
-                          f'at step {step_idx:3d}, '
-                          f'budget_after={stats.budget_final:.2f}')
-
-                # ── console: periodic running summary ──────────────────────
-                if log_interval > 0 and (ep + 1) % log_interval == 0:
-                    w  = log_interval
-                    sl = slice(max(0, ep + 1 - w), ep + 1)
-                    print(f'    [ep {ep+1:4d}] {agent_name:10s} seed={seed} '
-                          f'rew={np.mean(ep_rewards[sl]):+7.2f}  '
-                          f'win={np.mean(ep_wins[sl]):.2f}  '
-                          f'lA={np.mean(ep_labelA[sl]):.2f}  '
-                          f'loss={stats.mean_loss:.4f}'
-                          + (f'  tloss={stats.mean_trans_loss:.4f}'
-                             if agent_name == 'DAI-P' else ''))
-
-                # ── wandb: per-episode metrics ─────────────────────────────
-                wandb_metrics = {
-                    'reward':        stats.total_reward,
-                    'win':           int(stats.win),
-                    'n_labels':      stats.n_labels,
-                    'label_A':       int(stats.labels[0]),
-                    'budget_final':  stats.budget_final,
-                    'n_steps':       stats.n_steps,
-                    'loss':          stats.mean_loss,
-                }
-                if agent_name == 'DAI-P':
-                    wandb_metrics['trans_loss'] = stats.mean_trans_loss
-                wlog.log(wandb_metrics, step=ep)
-
-            # ── console: per-(seed, agent) summary ────────────────────────
-            if verbose:
-                late = slice(-50, None)
-                print(f'  {agent_name:10s}  '
-                      f'mean_rew={np.mean(ep_rewards[late]):.2f}  '
-                      f'win_rate={np.mean(ep_wins[late]):.2f}  '
-                      f'label_A_rate={np.mean(ep_labelA[late]):.2f}  '
-                      f'mean_labels={np.mean(ep_labels[late]):.2f}')
-
-            # ── wandb: run summary ─────────────────────────────────────────
-            for phase, sl in [('early', slice(0, 50)), ('late', slice(-50, None))]:
-                arr_r  = np.array(ep_rewards)[sl]
-                arr_w  = np.array(ep_wins)[sl]
-                arr_la = np.array(ep_labelA)[sl]
-                wlog.summary({
-                    f'{phase}/mean_reward':   float(arr_r.mean()),
-                    f'{phase}/win_rate':      float(arr_w.mean()),
-                    f'{phase}/label_A_rate':  float(arr_la.mean()),
-                })
-            wlog.finish()
-
-            results[agent_name]['rewards'].append(ep_rewards)
-            results[agent_name]['wins'].append(ep_wins)
-            results[agent_name]['n_labels'].append(ep_labels)
-            results[agent_name]['label_A'].append(ep_labelA)
-            results[agent_name]['budget'].append(ep_budget)
+    for r in raw:
+        name = r['agent']
+        results[name]['rewards'].append(r['rewards'])
+        results[name]['wins'].append(r['wins'])
+        results[name]['n_labels'].append(r['n_labels'])
+        results[name]['label_A'].append(r['label_A'])
+        results[name]['budget'].append(r['budget'])
 
     return results
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 11. Plotting
+# 13. Plotting
 # ──────────────────────────────────────────────────────────────────────────────
 
 def plot_results(results: dict, n_episodes: int,
@@ -1204,9 +1243,9 @@ def plot_results(results: dict, n_episodes: int,
     xs       = np.arange(n_episodes)
 
     fig, axes = plt.subplots(2, 3, figsize=(16, 9))
+    n_seeds = len(next(iter(results.values()))['wins'])
     fig.suptitle(
-        'Synthetic LION — DDQN vs. DAI-P vs. Break-Even  '
-        f'({len(next(iter(results.values()))["wins"])} seeds)',
+        f'Synthetic LION — DDQN vs. DAI-P vs. Break-Even  ({n_seeds} seeds)',
         fontsize=13, fontweight='bold'
     )
 
@@ -1250,15 +1289,13 @@ def plot_results(results: dict, n_episodes: int,
         'Uninformed A-flow accepted → −7\n'
         'After label-A: blocked     → +2.5\n\n'
         'Break-Even: buys highest-anomaly\n'
-        '  cluster first (always = B).\n'
-        '  A has LOW anomaly score.\n'
-        '  → A purchased last or never.\n\n'
-        'DAI-P epistemic gain:\n'
-        '  buy-label-A causes largest\n'
-        '  proprioceptive state flip\n'
-        '  (known-conf benign→malicious)\n'
-        '  → highest prediction error\n'
-        '  → highest intrinsic value.\n'
+        '  cluster first (= B, always).\n'
+        '  A has LOW anomaly score → last.\n\n'
+        'DAI-P epistemic gain (learned):\n'
+        '  buy-label-A zeroes conf_unk_0\n'
+        '  → largest proprio state change\n'
+        '  → highest transition MSE\n'
+        '  → highest intrinsic value\n'
         '  → faster early convergence.\n'
     )
     axes[1, 2].text(0.04, 0.97, txt, transform=axes[1, 2].transAxes,
@@ -1272,95 +1309,76 @@ def plot_results(results: dict, n_episodes: int,
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 12. Entry point
+# 14. Entry point
 # ──────────────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description='Synthetic LION experiment')
-    parser.add_argument('--episodes',      type=int,  default=300,
-                        help='Episodes per agent per seed (default 300)')
-    parser.add_argument('--seeds',         type=int,  default=5,
-                        help='Number of random seeds (default 5)')
-    parser.add_argument('--no-plot',       action='store_true',
-                        help='Skip matplotlib output')
-    parser.add_argument('--verbose',       action='store_true', default=True)
-    parser.add_argument('--log-interval',  type=int,  default=50,
-                        help='Print running stats every N episodes per agent (0=off, default 50)')
-    parser.add_argument('--wandb-project', type=str,  default='LION',
-                        help='W&B project name (enables wandb logging)')
-    parser.add_argument('--wandb-entity',  type=str,  default='jfcevallos',
-                        help='W&B entity (team or user); uses default if omitted')
-    parser.add_argument('--wandb-group',   type=str,  default=None,
-                        help='W&B run group tag (auto-generated if omitted)')
-    parser.add_argument('--env-file',      type=str,  default='.env',
-                        help='Path to .env file for WANDB_API_KEY (default .env)')
-    parser.add_argument('--plot-path',     type=str,  default='synthetic_lion_results.png',
-                        help='Output path for results figure')
-    parser.add_argument('--device',        type=str,  default=None,
-                        help='Compute device: "cpu", "cuda", "cuda:0", "mps", … '
-                             '(auto-detects GPU if omitted)')
+    parser.add_argument('--episodes',          type=int,  default=300)
+    parser.add_argument('--seeds',             type=int,  default=5)
+    parser.add_argument('--no-plot',           action='store_true')
+    parser.add_argument('--verbose',           action='store_true', default=True)
+    parser.add_argument('--log-interval',      type=int,  default=50,
+                        help='Print running stats every N episodes (0=off)')
+    # GPU / parallelism
+    parser.add_argument('--gpus',              type=str,  default='0',
+                        help='"0", "0,1,2", "auto" (free GPUs), or "cpu"')
+    parser.add_argument('--workers-per-gpu',   type=int,  default=1,
+                        help='Parallel workers per GPU (default 1)')
+    parser.add_argument('--min-free-gpu-gb',   type=float, default=10.0,
+                        help='Min free VRAM (GB) for --gpus auto (default 10)')
+    # Wandb
+    parser.add_argument('--wandb-project',     type=str,  default=None)
+    parser.add_argument('--wandb-entity',      type=str,  default=None)
+    parser.add_argument('--wandb-group',       type=str,  default=None)
+    parser.add_argument('--env-file',          type=str,  default='.env')
+    parser.add_argument('--plot-path',         type=str,
+                        default='synthetic_lion_results.png')
     args = parser.parse_args()
 
-    # Load WANDB_API_KEY (and any other vars) from .env before touching wandb
     load_dotenv(args.env_file)
 
-    # ── Device selection ────────────────────────────────────────────────────
-    if args.device:
-        device = torch.device(args.device)
-    elif torch.cuda.is_available():
-        device = torch.device('cuda')
-    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        device = torch.device('mps')
-    else:
-        device = torch.device('cpu')
-    CFG['device'] = str(device)
-    global _DEVICE
-    _DEVICE = device
+    gpus = _parse_gpus(args.gpus, args.min_free_gpu_gb)
 
     print('=' * 65)
     print(' Synthetic LION experiment')
     print(f'  Episodes : {args.episodes}   Seeds : {args.seeds}')
-    print(f'  Device   : {device}')
+    print(f'  GPUs     : {gpus}   Workers/GPU : {args.workers_per_gpu}')
     if args.wandb_project:
         print(f'  W&B      : project={args.wandb_project}  '
               f'entity={args.wandb_entity or "(default)"}')
     print('=' * 65)
     print()
+
+    dg_preview = DataGenerator()
     print('Data layout:')
-    dg = DataGenerator()
-    for k in range(dg.N_KNOWN):
-        print(f'  Known  {k} ({dg.KNOWN_TYPES[k]:8s}): μ={dg.KNOWN_MEANS[k]}')
-    for u in range(dg.N_UNKNOWN):
-        print(f'  Unknown {dg.UNKNOWN_NAMES[u]:20s}: μ={dg.UNKNOWN_MEANS[u]}'
-              f'  price={CFG["label_prices"][u]}')
-    print()
-    print('When is AI expected to win?')
-    print('  Unknown-A looks BENIGN to the uninformed inference module')
-    print('  → accepted → −7 per flow.  After buying label-A the module')
-    print("    flips to 'malicious A' → blocked → +2.5 per flow.")
-    print('  Buying label-A produces the LARGEST one-step proprioceptive')
-    print('  state change → highest perceptive-epistemic gain in DAI-P.')
-    print('  Break-Even de-prioritises A because its anomaly score is LOW.')
+    for k in range(dg_preview.N_KNOWN):
+        print(f'  Known  {k} ({dg_preview.KNOWN_TYPES[k]:8s}): μ={dg_preview.KNOWN_MEANS[k]}')
+    for u in range(dg_preview.N_UNKNOWN):
+        print(f'  Unknown {dg_preview.UNKNOWN_NAMES[u]:20s}: '
+              f'μ={dg_preview.UNKNOWN_MEANS[u]}  price={CFG["label_prices"][u]}')
     print()
 
     t0      = time.time()
     seeds   = list(range(args.seeds))
     results = run_experiment(
-        n_episodes    = args.episodes,
-        seeds         = seeds,
-        cfg           = CFG,
-        verbose       = args.verbose,
-        log_interval  = args.log_interval,
-        wandb_project = args.wandb_project,
-        wandb_entity  = args.wandb_entity,
-        wandb_group   = args.wandb_group,
+        n_episodes      = args.episodes,
+        seeds           = seeds,
+        cfg             = CFG,
+        gpus            = gpus,
+        workers_per_gpu = args.workers_per_gpu,
+        verbose         = args.verbose,
+        log_interval    = args.log_interval,
+        wandb_project   = args.wandb_project,
+        wandb_entity    = args.wandb_entity,
+        wandb_group     = args.wandb_group,
+        env_file        = args.env_file,
     )
     elapsed = time.time() - t0
 
-    # ── Summary tables ─────────────────────────────────────────────────────
+    # ── Summary tables ────────────────────────────────────────────────────────
     header = (f'{"Agent":12s}  {"MeanRew":>9}  {"WinRate":>8}  '
               f'{"LabelA":>8}  {"±σ WinRate":>11}')
-
     for label, slc in [('EARLY (ep 1-50)', slice(0, 50)),
                         ('LATE  (ep last 50)', slice(-50, None))]:
         print()
@@ -1370,20 +1388,20 @@ def main():
         print(header)
         print('─' * 65)
         for name in AGENTS:
-            rews     = np.array(results[name]['rewards'])[:, slc].mean()
-            arr_w    = np.array(results[name]['wins'])[:, slc]
-            wins     = arr_w.mean()
-            wins_sd  = arr_w.mean(axis=1).std()
-            labelA   = np.array(results[name]['label_A'])[:, slc].mean()
+            rews    = np.array(results[name]['rewards'])[:, slc].mean()
+            arr_w   = np.array(results[name]['wins'])[:, slc]
+            wins    = arr_w.mean()
+            wins_sd = arr_w.mean(axis=1).std()
+            labelA  = np.array(results[name]['label_A'])[:, slc].mean()
             print(f'{name:12s}  {rews:>9.2f}  {wins:>8.3f}  '
                   f'{labelA:>8.3f}  {wins_sd:>11.3f}')
         print('─' * 65)
 
-    print(f'\nTotal wall-clock time: {elapsed:.1f}s')
+    print(f'\nTotal wall-clock time: {elapsed:.1f}s  '
+          f'({elapsed / (args.seeds * len(AGENTS)):.1f}s per run avg)')
 
-    # ── Plot ────────────────────────────────────────────────────────────────
     if not args.no_plot:
-        plot_path = plot_results(results, args.episodes, out_path=args.plot_path)
+        plot_results(results, args.episodes, out_path=args.plot_path)
 
 
 if __name__ == '__main__':
