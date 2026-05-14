@@ -1,1 +1,4 @@
 __pycache__/
+wandb
+.ipynb_checkpoints
+.env

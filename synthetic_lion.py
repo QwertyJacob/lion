@@ -157,7 +157,7 @@ CFG = dict(
     # zeroed) fires immediately — giving DAI-P its epistemic boost — but informed
     # rewards are withheld because the inference module hasn't integrated the label yet.
     # This dilutes DDQN's TD credit assignment while leaving DAI-P's advantage intact.
-    label_integration_lag = 15,
+    label_integration_lag = 30,
 
     # Inference module
     anomaly_threshold = 1.8,  # hidden-space L2 distance → anomaly if >
@@ -1132,10 +1132,11 @@ def _run_one(task: dict) -> dict:
         ep_labelA.append(int(stats.labels[0]))
         ep_budget.append(stats.budget_final)
 
-        for step_idx, uid in stats.label_buy_steps:
-            print(f'    [BUY] ep={ep:4d} seed={seed} {agent_name:10s} '
-                  f'→ uid={uid} ({dg.UNKNOWN_NAMES[uid]}/{dg.UNKNOWN_TYPES[uid]}) '
-                  f'step={step_idx:3d}  budget={stats.budget_final:.2f}', flush=True)
+        if verbose:
+            for step_idx, uid in stats.label_buy_steps:
+                print(f'    [BUY] ep={ep:4d} seed={seed} {agent_name:10s} '
+                    f'→ uid={uid} ({dg.UNKNOWN_NAMES[uid]}/{dg.UNKNOWN_TYPES[uid]}) '
+                    f'step={step_idx:3d}  budget={stats.budget_final:.2f}', flush=True)
 
         if log_interval > 0 and (ep + 1) % log_interval == 0:
             w  = log_interval
@@ -1361,7 +1362,7 @@ def main():
     parser.add_argument('--episodes',          type=int,  default=300)
     parser.add_argument('--seeds',             type=int,  default=5)
     parser.add_argument('--no-plot',           action='store_true')
-    parser.add_argument('--verbose',           action='store_true', default=True)
+    parser.add_argument('--verbose',           action='store_true', default=False)
     parser.add_argument('--log-interval',      type=int,  default=50,
                         help='Print running stats every N episodes (0=off)')
     # GPU / parallelism
