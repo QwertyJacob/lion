@@ -904,6 +904,13 @@ class DAIPAgent:
             pred_next = self.trans_net(S, AOH)
             epist     = 0.5 * ((next_proprio - pred_next) ** 2).sum(dim=1, keepdim=True)
 
+        # per-action mean epistemic gain (block=0, accept=1, buy_label=2)
+        epist_per_action: Dict[int, float] = {}
+        for a_idx in range(ACTION_SIZE):
+            mask = (A == a_idx)
+            if mask.any():
+                epist_per_action[a_idx] = epist[mask].mean().item()
+
         # ── EFE targets ───────────────────────────────────────────────────────
         with torch.no_grad():
             a_next      = self.efe_net(S2).argmax(1, keepdim=True)
@@ -934,7 +941,7 @@ class DAIPAgent:
             self.efe_target.load_state_dict(self.efe_net.state_dict())
 
         return {'loss': efe_loss.item(), 'trans_loss': trans_loss.item(),
-                'epist': epist.mean().item()}
+                'epist_per_action': epist_per_action}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1004,7 +1011,8 @@ class EpisodeStats:
     # training losses (averaged over all gradient steps in the episode)
     mean_loss:       float = 0.0
     mean_trans_loss: float = 0.0  # DAI-P only
-    mean_epist:      float = 0.0  # DAI-P only; mean batch epistemic gain
+    # DAI-P only; mean batch epistemic gain per action (0=block,1=accept,2=buy_label)
+    epist_per_action: Dict[int, float] = field(default_factory=lambda: {0: 0.0, 1: 0.0, 2: 0.0})
     # per-step data for space visualisation (populated only when collect_vis=True)
     step_rewards:  List[float] = field(default_factory=list)
     input_points:  List        = field(default_factory=list)  # (N, 2) raw inputs
@@ -1017,7 +1025,8 @@ def run_episode(agent, env: SyntheticLIONEnv, train: bool = True,
                 collect_vis: bool = False) -> EpisodeStats:
     state = env.reset()
     stats = EpisodeStats()
-    losses, trans_losses, epist_vals = [], [], []
+    losses, trans_losses = [], []
+    epist_by_action: Dict[int, List[float]] = {0: [], 1: [], 2: []}
 
     while True:
         # Capture current flow before step() mutates it (loads next flow)
@@ -1047,9 +1056,11 @@ def run_episode(agent, env: SyntheticLIONEnv, train: bool = True,
             agent.push(state, action, reward, next_state, done)
             loss_info = agent.train_step()
             if loss_info:
-                if 'loss'       in loss_info: losses.append(loss_info['loss'])
-                if 'trans_loss' in loss_info: trans_losses.append(loss_info['trans_loss'])
-                if 'epist'      in loss_info: epist_vals.append(loss_info['epist'])
+                if 'loss'            in loss_info: losses.append(loss_info['loss'])
+                if 'trans_loss'      in loss_info: trans_losses.append(loss_info['trans_loss'])
+                if 'epist_per_action' in loss_info:
+                    for a_idx, val in loss_info['epist_per_action'].items():
+                        epist_by_action[a_idx].append(val)
 
         state = next_state
         if done:
@@ -1060,7 +1071,10 @@ def run_episode(agent, env: SyntheticLIONEnv, train: bool = True,
             stats.budget_final    = info['budget']
             stats.mean_loss       = float(np.mean(losses))       if losses       else 0.0
             stats.mean_trans_loss = float(np.mean(trans_losses)) if trans_losses else 0.0
-            stats.mean_epist      = float(np.mean(epist_vals))   if epist_vals   else 0.0
+            stats.epist_per_action = {
+                a: float(np.mean(vals)) if vals else 0.0
+                for a, vals in epist_by_action.items()
+            }
             break
 
     return stats
@@ -1229,7 +1243,7 @@ def _run_one(task: dict) -> dict:
                     f'loss={stats.mean_loss:.4f}')
             if agent_name == 'DAI-P':
                 line += f'  tloss={stats.mean_trans_loss:.4f}'
-                line += f'  epist={stats.mean_epist:.4f}'
+                line += f'  epist_buy={stats.epist_per_action.get(2, 0.0):.4f}'
             print(line, flush=True)
 
         wm = dict(reward=stats.total_reward, win=int(stats.win),
@@ -1238,7 +1252,9 @@ def _run_one(task: dict) -> dict:
                   loss=stats.mean_loss)
         if agent_name == 'DAI-P':
             wm['trans_loss'] = stats.mean_trans_loss
-            wm['epist_gain'] = stats.mean_epist
+            _action_names = {0: 'block', 1: 'accept', 2: 'buy_label'}
+            for a_idx, a_name in _action_names.items():
+                wm[f'epistemic_gains/{a_name}'] = stats.epist_per_action.get(a_idx, 0.0)
 
         if at_log and wlog.active:
             wm.update(_space_scatter_figs(stats, seed))
