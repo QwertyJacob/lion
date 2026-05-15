@@ -140,7 +140,8 @@ CFG = dict(
 
     # unknown flows before label is bought
     # A: overlapping-malicious, B: separate-malicious, C: separate-benign, D: near-malicious-benign
-    r_accept_A_uninformed =  -7.0,   # agent is fooled: thinks it's benign, accepts
+    # UA acceptance looks benign immediately but triggers a deferred budget drain
+    r_accept_A_uninformed =  +0.5,   # sleeper: looks benign, but fires deferred drain
     r_block_A_uninformed  =   0.5,   # accidental good block
     r_accept_B_uninformed =  -3.5,   # anomaly visible, but accepting possible
     r_block_B_uninformed  =   1.5,   # anomaly detected and blocked
@@ -165,8 +166,12 @@ CFG = dict(
     epsilon_end   = 0.05,
     epsilon_decay = 0.9995,   # multiplicative decay per training step
 
+    # UA deferred drain: accepting class-A uninformed queues budget hits over next steps
+    ua_deferred_drain_per_step = 2.5,  # per-step penalty for ua_deferred_steps steps → total −10
+    ua_deferred_steps          = 4,
+
     # DAI-P
-    epistemic_weight = 0.5,   # weight on perceptive-epistemic gain in EFE target
+    epistemic_weight = 2.0,   # weight on perceptive-epistemic gain in EFE target
 
     # Inference module
     anomaly_threshold = 1.8,  # hidden-space L2 distance → anomaly if >
@@ -563,6 +568,7 @@ class SyntheticLIONEnv:
         self.budget        = self.cfg['init_budget']
         self.t             = 0
         self.labels_bought = [False] * self.n_unk
+        self.deferred_drains: List[float] = []
         self.inf.reset_episode_state(self._pretrained_n_known, self.dg)
         self._step_flow()
         return self._state()
@@ -677,6 +683,17 @@ class SyntheticLIONEnv:
                           else cfg['r_accept_malicious_informed'])
             else:
                 reward = cfg.get(f'r_accept_{self.dg.UNKNOWN_NAMES[uid][0]}_uninformed', -1.0)
+                # Accepting class-A uninformed queues a deferred drain spread over
+                # several future steps — hard for DDQN to credit-assign back.
+                if uid == 0:
+                    for _ in range(cfg.get('ua_deferred_steps', 0)):
+                        self.deferred_drains.append(
+                            -cfg.get('ua_deferred_drain_per_step', 0.0)
+                        )
+
+        # Apply one deferred drain this step (if any are pending)
+        if self.deferred_drains:
+            reward += self.deferred_drains.pop(0)
 
         self.budget += reward
         self.t      += 1
@@ -936,9 +953,13 @@ class DAIPAgent:
         next_proprio = S2[:, STATE_DIM - PROPRIO_DIM:]
 
         # ── epistemic gain ────────────────────────────────────────────────────
+        # Weight conf_unk dims (first 4) 3× more heavily: they jump sharply on
+        # buy-label transitions and carry the label-value signal.
         with torch.no_grad():
-            pred_next = self.trans_net(S, AOH)
-            epist     = 0.5 * ((next_proprio - pred_next) ** 2).sum(dim=1, keepdim=True)
+            pred_next     = self.trans_net(S, AOH)
+            conf_unk_err  = ((next_proprio[:, :4] - pred_next[:, :4]) ** 2).sum(dim=1, keepdim=True)
+            other_err     = ((next_proprio[:, 4:] - pred_next[:, 4:]) ** 2).sum(dim=1, keepdim=True)
+            epist         = 0.5 * (3.0 * conf_unk_err + other_err)
 
         # per-action mean epistemic gain (block=0, accept=1, buy_label=2)
         epist_per_action: Dict[int, float] = {}
