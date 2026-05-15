@@ -1417,6 +1417,8 @@ class EpisodeStats:
     epist_per_action:      Dict[int, float] = field(default_factory=lambda: {0: 0.0, 1: 0.0, 2: 0.0})
     # DAI-P only; mean single-step epistemic gain when buying each cluster (uid 0-3 = A-D)
     epist_buy_per_cluster: Dict[int, float] = field(default_factory=lambda: {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0})
+    # mean unk_conf per cluster, averaged over steps before that cluster's label is bought
+    unk_conf_mean: Dict[int, float] = field(default_factory=lambda: {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0})
     # per-step data for space visualisation (populated only when collect_vis=True)
     step_rewards:  List[float] = field(default_factory=list)
     input_points:  List        = field(default_factory=list)  # (N, 2) raw inputs
@@ -1432,8 +1434,14 @@ def run_episode(agent, env: SyntheticLIONEnv, train: bool = True,
     losses, trans_losses = [], []
     epist_by_action:  Dict[int, List[float]] = {0: [], 1: [], 2: []}
     epist_buy_by_uid: Dict[int, List[float]] = {0: [], 1: [], 2: [], 3: []}
+    # unk_conf samples per cluster, collected only while label not yet bought
+    unk_conf_samples: Dict[int, List[float]] = {0: [], 1: [], 2: [], 3: []}
 
     while True:
+        # Snapshot unk_conf for each cluster that hasn't been bought yet this step
+        for u in range(env.n_unk):
+            if not env.labels_bought[u]:
+                unk_conf_samples[u].append(float(env.inf.unk_conf[u].item()))
         # Capture current flow before step() mutates it (loads next flow)
         if collect_vis:
             f = env._flow
@@ -1487,6 +1495,10 @@ def run_episode(agent, env: SyntheticLIONEnv, train: bool = True,
             stats.epist_buy_per_cluster = {
                 uid: float(np.mean(vals)) if vals else 0.0
                 for uid, vals in epist_buy_by_uid.items()
+            }
+            stats.unk_conf_mean = {
+                uid: float(np.mean(vals)) if vals else 0.0
+                for uid, vals in unk_conf_samples.items()
             }
             break
 
@@ -1704,6 +1716,9 @@ def _run_one(task: dict) -> dict:
                   loss=stats.mean_loss)
         if agent_name in _HAS_TRANS:
             wm['trans_loss'] = stats.mean_trans_loss
+        _cluster_names = {0: 'A', 1: 'B', 2: 'C', 3: 'D'}
+        for uid, cname in _cluster_names.items():
+            wm[f'unk_confs/{cname}'] = stats.unk_conf_mean.get(uid, 0.0)
         if agent_name == 'DAI-P':
             for a_idx, a_name in {0: 'block', 1: 'accept'}.items():
                 wm[f'epistemic_gains/{a_name}'] = stats.epist_per_action.get(a_idx, 0.0)
