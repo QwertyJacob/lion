@@ -1021,6 +1021,22 @@ class DAIAAgent:
             probs = F.softmax(self.temperature * nefe, dim=-1)
         return torch.multinomial(probs, 1).item()
 
+    def compute_epist(self, state: torch.Tensor, action: int,
+                      next_state: torch.Tensor) -> float:
+        """Single-step active epistemic gain: KL( Q(a|s,s') ‖ Q(a|s) )."""
+        with torch.no_grad():
+            s            = state.unsqueeze(0).to(self.device)
+            next_proprio = next_state[-PROPRIO_DIM:].unsqueeze(0).to(self.device)
+            policy_prior = self.policy_net(s).squeeze(0)          # (A,)
+            exp_s        = s.expand(ACTION_SIZE, -1)              # (A, S)
+            pred_nexts   = self.trans_net(exp_s, self._eye)       # (A, prop)
+            log_lik      = -0.5 * ((next_proprio.expand(ACTION_SIZE, -1) - pred_nexts)
+                                   ** 2).sum(dim=1)               # (A,)
+            log_post     = log_lik + torch.log(policy_prior + 1e-8)
+            posterior    = F.softmax(log_post, dim=0).clamp_min(1e-8)
+            return (posterior * (torch.log(posterior)
+                                 - torch.log(policy_prior + 1e-8))).sum().item()
+
     def push(self, s, a, r, s2, done):
         self.buf.push(s.cpu(), torch.tensor(a),
                       torch.tensor(r, dtype=torch.float32),
@@ -1100,8 +1116,15 @@ class DAIAAgent:
         if self._steps % self.target_upd == 0:
             self.efe_target.load_state_dict(self.efe_net.state_dict())
 
+        epist_per_action: Dict[int, float] = {}
+        for a_idx in range(ACTION_SIZE):
+            mask = (A == a_idx)
+            if mask.any():
+                epist_per_action[a_idx] = active_epist[mask].mean().item()
+
         return {'loss': efe_loss.item(), 'trans_loss': trans_loss.item(),
-                'active_epist': active_epist.mean().item()}
+                'active_epist': active_epist.mean().item(),
+                'epist_per_action': epist_per_action}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1150,6 +1173,15 @@ class DAISAAgent:
             nefe  = self.efe_net(state.to(self.device)).squeeze()
             probs = F.softmax(self.temperature * nefe, dim=-1)
         return torch.multinomial(probs, 1).item()
+
+    def compute_epist(self, state: torch.Tensor, action: int,
+                      next_state: torch.Tensor) -> float:
+        """Single-step surrogate epistemic gain: ‖Q_φ(a|s) − P(a|s)‖²."""
+        with torch.no_grad():
+            s             = state.unsqueeze(0).to(self.device)
+            target_policy = F.softmax(self.temperature * self.efe_net(s), dim=1)
+            policy_prior  = self.policy_net(s)
+            return ((policy_prior - target_policy) ** 2).sum().item()
 
     def push(self, s, a, r, s2, done):
         self.buf.push(s.cpu(), torch.tensor(a),
@@ -1208,8 +1240,15 @@ class DAISAAgent:
         if self._steps % self.target_upd == 0:
             self.efe_target.load_state_dict(self.efe_net.state_dict())
 
+        epist_per_action: Dict[int, float] = {}
+        for a_idx in range(ACTION_SIZE):
+            mask = (A == a_idx)
+            if mask.any():
+                epist_per_action[a_idx] = surrogate_epist[mask].mean().item()
+
         return {'loss': efe_loss.item(),
-                'surrogate_epist': surrogate_epist.mean().item()}
+                'surrogate_epist': surrogate_epist.mean().item(),
+                'epist_per_action': epist_per_action}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1259,6 +1298,28 @@ class DAIFAgent:
             nefe  = self.efe_net(state.to(self.device)).squeeze()
             probs = F.softmax(self.temperature * nefe, dim=-1)
         return torch.multinomial(probs, 1).item()
+
+    def compute_epist(self, state: torch.Tensor, action: int,
+                      next_state: torch.Tensor) -> float:
+        """Single-step total epistemic gain: perceptive (MSE) + active (KL)."""
+        with torch.no_grad():
+            s            = state.unsqueeze(0).to(self.device)
+            aoh          = self._eye[action].unsqueeze(0)
+            next_proprio = next_state[-PROPRIO_DIM:].unsqueeze(0).to(self.device)
+            # Perceptive
+            pred_next    = self.trans_net(s, aoh)
+            perceptive   = 0.5 * ((next_proprio - pred_next) ** 2).sum()
+            # Active (KL)
+            policy_prior = self.policy_net(s).squeeze(0)          # (A,)
+            exp_s        = s.expand(ACTION_SIZE, -1)
+            pred_nexts   = self.trans_net(exp_s, self._eye)
+            log_lik      = -0.5 * ((next_proprio.expand(ACTION_SIZE, -1) - pred_nexts)
+                                   ** 2).sum(dim=1)
+            log_post     = log_lik + torch.log(policy_prior + 1e-8)
+            posterior    = F.softmax(log_post, dim=0).clamp_min(1e-8)
+            active       = (posterior * (torch.log(posterior)
+                                         - torch.log(policy_prior + 1e-8))).sum()
+            return (perceptive + active).item()
 
     def push(self, s, a, r, s2, done):
         self.buf.push(s.cpu(), torch.tensor(a),
@@ -1341,9 +1402,16 @@ class DAIFAgent:
         if self._steps % self.target_upd == 0:
             self.efe_target.load_state_dict(self.efe_net.state_dict())
 
+        epist_per_action: Dict[int, float] = {}
+        for a_idx in range(ACTION_SIZE):
+            mask = (A == a_idx)
+            if mask.any():
+                epist_per_action[a_idx] = total_epist[mask].mean().item()
+
         return {'loss': efe_loss.item(), 'trans_loss': trans_loss.item(),
                 'perceptive_epist': perceptive_epist.mean().item(),
-                'active_epist': active_epist.mean().item()}
+                'active_epist': active_epist.mean().item(),
+                'epist_per_action': epist_per_action}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1412,8 +1480,8 @@ class EpisodeStats:
     label_buy_steps: List[Tuple[int, int]] = field(default_factory=list)
     # training losses (averaged over all gradient steps in the episode)
     mean_loss:       float = 0.0
-    mean_trans_loss: float = 0.0  # DAI-P only
-    # DAI-P only; mean batch epistemic gain per action (0=block, 1=accept, 2=buy_label)
+    mean_trans_loss: float = 0.0  # agents with TransitionNet only
+    # DAI agents only; mean batch epistemic gain per action (0=block, 1=accept, 2=buy_label)
     epist_per_action:      Dict[int, float] = field(default_factory=lambda: {0: 0.0, 1: 0.0, 2: 0.0})
     # DAI-P only; mean single-step epistemic gain when buying each cluster (uid 0-3 = A-D)
     epist_buy_per_cluster: Dict[int, float] = field(default_factory=lambda: {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0})
@@ -1464,7 +1532,7 @@ def run_episode(agent, env: SyntheticLIONEnv, train: bool = True,
         for uid, (before, after) in enumerate(zip(prev_labels, info['labels'])):
             if not before and after:
                 stats.label_buy_steps.append((env.t, uid))
-                if isinstance(agent, DAIPAgent):
+                if hasattr(agent, 'compute_epist'):
                     epist_buy_by_uid[uid].append(
                         agent.compute_epist(state, action, next_state)
                     )
@@ -1628,6 +1696,9 @@ _AGENT_LS = {
 # Agents that use a transition net (have 'trans_loss' in their train_step return).
 _HAS_TRANS = {'DAI-P', 'DAI-A', 'DAI-F'}
 
+# All DAI-based agents (emit 'epist_per_action' from train_step).
+_DAI_AGENTS = {'DAI-P', 'DAI-A', 'DAI-SA', 'DAI-F'}
+
 
 def make_agent(name: str, cfg: dict):
     if name == 'DDQN':       return DDQNAgent(cfg)
@@ -1705,8 +1776,12 @@ def _run_one(task: dict) -> dict:
                     f'loss={stats.mean_loss:.4f}')
             if agent_name in _HAS_TRANS:
                 line += f'  tloss={stats.mean_trans_loss:.4f}'
-            if agent_name == 'DAI-P':
-                line += f'  epist_buyA={stats.epist_buy_per_cluster.get(0, 0.0):.4f}'
+            if agent_name in _DAI_AGENTS:
+                epist_vals = list(stats.epist_per_action.values())
+                mean_epist = float(np.mean(epist_vals)) if epist_vals else 0.0
+                line += f'  epist_mean={mean_epist:.4f}'
+                if agent_name == 'DAI-P':
+                    line += f'  epist_buyA={stats.epist_buy_per_cluster.get(0, 0.0):.4f}'
             print(line, flush=True)
 
         mean_reward = stats.total_reward / max(stats.n_steps, 1)
@@ -1719,10 +1794,11 @@ def _run_one(task: dict) -> dict:
         _cluster_names = {0: 'A', 1: 'B', 2: 'C', 3: 'D'}
         for uid, cname in _cluster_names.items():
             wm[f'unk_confs/{cname}'] = stats.unk_conf_mean.get(uid, 0.0)
-        if agent_name == 'DAI-P':
-            for a_idx, a_name in {0: 'block', 1: 'accept'}.items():
+        if agent_name in _DAI_AGENTS:
+            for a_idx, a_name in {0: 'block', 1: 'accept', 2: 'buy_label'}.items():
                 wm[f'epistemic_gains/{a_name}'] = stats.epist_per_action.get(a_idx, 0.0)
-            _cluster_names = {0: 'A', 1: 'B', 2: 'C', 3: 'D'}
+            epist_vals = list(stats.epist_per_action.values())
+            wm['epistemic_gains/mean'] = float(np.mean(epist_vals)) if epist_vals else 0.0
             for uid, cname in _cluster_names.items():
                 wm[f'epistemic_gains/buy_{cname}'] = stats.epist_buy_per_cluster.get(uid, 0.0)
 
