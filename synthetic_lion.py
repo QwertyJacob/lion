@@ -123,8 +123,8 @@ CFG = dict(
     # spending 6 of 15 up front; then can only afford C (4) and is stuck with
     # 5 left—not enough for A (5 exact) if any A-flow has already drained budget.
     # DAI-P's epistemic gain pushes it to buy A first despite A's low anomaly score.
-    max_steps    = 50,
-    init_budget  = 15.0,
+    max_steps    = 30,
+    init_budget  = 8.0,
     min_budget   = 0.0,
     max_budget   = 40.0,
 
@@ -2026,8 +2026,8 @@ def plot_results(results: dict, n_episodes: int,
 
 def main():
     parser = argparse.ArgumentParser(description='Synthetic LION experiment')
-    parser.add_argument('--episodes',          type=int,  default=300)
-    parser.add_argument('--seeds',             type=int,  default=5)
+    parser.add_argument('--episodes',          type=int,  default=500)
+    parser.add_argument('--seeds',             type=int,  default=10)
     parser.add_argument('--no-plot',           action='store_true')
     parser.add_argument('--verbose',           action='store_true', default=False)
     parser.add_argument('--log-interval',      type=int,  default=0,
