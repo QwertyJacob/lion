@@ -1021,6 +1021,22 @@ class DAIAAgent:
             probs = F.softmax(self.temperature * nefe, dim=-1)
         return torch.multinomial(probs, 1).item()
 
+    def compute_epist(self, state: torch.Tensor, action: int,
+                      next_state: torch.Tensor) -> float:
+        """Single-step active epistemic gain: KL( Q(a|s,s') ‖ Q(a|s) )."""
+        with torch.no_grad():
+            s            = state.unsqueeze(0).to(self.device)
+            next_proprio = next_state[-PROPRIO_DIM:].unsqueeze(0).to(self.device)
+            policy_prior = self.policy_net(s).squeeze(0)          # (A,)
+            exp_s        = s.expand(ACTION_SIZE, -1)              # (A, S)
+            pred_nexts   = self.trans_net(exp_s, self._eye)       # (A, prop)
+            log_lik      = -0.5 * ((next_proprio.expand(ACTION_SIZE, -1) - pred_nexts)
+                                   ** 2).sum(dim=1)               # (A,)
+            log_post     = log_lik + torch.log(policy_prior + 1e-8)
+            posterior    = F.softmax(log_post, dim=0).clamp_min(1e-8)
+            return (posterior * (torch.log(posterior)
+                                 - torch.log(policy_prior + 1e-8))).sum().item()
+
     def push(self, s, a, r, s2, done):
         self.buf.push(s.cpu(), torch.tensor(a),
                       torch.tensor(r, dtype=torch.float32),
@@ -1158,6 +1174,15 @@ class DAISAAgent:
             probs = F.softmax(self.temperature * nefe, dim=-1)
         return torch.multinomial(probs, 1).item()
 
+    def compute_epist(self, state: torch.Tensor, action: int,
+                      next_state: torch.Tensor) -> float:
+        """Single-step surrogate epistemic gain: ‖Q_φ(a|s) − P(a|s)‖²."""
+        with torch.no_grad():
+            s             = state.unsqueeze(0).to(self.device)
+            target_policy = F.softmax(self.temperature * self.efe_net(s), dim=1)
+            policy_prior  = self.policy_net(s)
+            return ((policy_prior - target_policy) ** 2).sum().item()
+
     def push(self, s, a, r, s2, done):
         self.buf.push(s.cpu(), torch.tensor(a),
                       torch.tensor(r, dtype=torch.float32),
@@ -1273,6 +1298,28 @@ class DAIFAgent:
             nefe  = self.efe_net(state.to(self.device)).squeeze()
             probs = F.softmax(self.temperature * nefe, dim=-1)
         return torch.multinomial(probs, 1).item()
+
+    def compute_epist(self, state: torch.Tensor, action: int,
+                      next_state: torch.Tensor) -> float:
+        """Single-step total epistemic gain: perceptive (MSE) + active (KL)."""
+        with torch.no_grad():
+            s            = state.unsqueeze(0).to(self.device)
+            aoh          = self._eye[action].unsqueeze(0)
+            next_proprio = next_state[-PROPRIO_DIM:].unsqueeze(0).to(self.device)
+            # Perceptive
+            pred_next    = self.trans_net(s, aoh)
+            perceptive   = 0.5 * ((next_proprio - pred_next) ** 2).sum()
+            # Active (KL)
+            policy_prior = self.policy_net(s).squeeze(0)          # (A,)
+            exp_s        = s.expand(ACTION_SIZE, -1)
+            pred_nexts   = self.trans_net(exp_s, self._eye)
+            log_lik      = -0.5 * ((next_proprio.expand(ACTION_SIZE, -1) - pred_nexts)
+                                   ** 2).sum(dim=1)
+            log_post     = log_lik + torch.log(policy_prior + 1e-8)
+            posterior    = F.softmax(log_post, dim=0).clamp_min(1e-8)
+            active       = (posterior * (torch.log(posterior)
+                                         - torch.log(policy_prior + 1e-8))).sum()
+            return (perceptive + active).item()
 
     def push(self, s, a, r, s2, done):
         self.buf.push(s.cpu(), torch.tensor(a),
@@ -1485,7 +1532,7 @@ def run_episode(agent, env: SyntheticLIONEnv, train: bool = True,
         for uid, (before, after) in enumerate(zip(prev_labels, info['labels'])):
             if not before and after:
                 stats.label_buy_steps.append((env.t, uid))
-                if isinstance(agent, DAIPAgent):
+                if hasattr(agent, 'compute_epist'):
                     epist_buy_by_uid[uid].append(
                         agent.compute_epist(state, action, next_state)
                     )
@@ -1752,9 +1799,8 @@ def _run_one(task: dict) -> dict:
                 wm[f'epistemic_gains/{a_name}'] = stats.epist_per_action.get(a_idx, 0.0)
             epist_vals = list(stats.epist_per_action.values())
             wm['epistemic_gains/mean'] = float(np.mean(epist_vals)) if epist_vals else 0.0
-            if agent_name == 'DAI-P':
-                for uid, cname in _cluster_names.items():
-                    wm[f'epistemic_gains/buy_{cname}'] = stats.epist_buy_per_cluster.get(uid, 0.0)
+            for uid, cname in _cluster_names.items():
+                wm[f'epistemic_gains/buy_{cname}'] = stats.epist_buy_per_cluster.get(uid, 0.0)
 
         if at_log and wlog.active:
             wm.update(_space_scatter_figs(stats, seed))
