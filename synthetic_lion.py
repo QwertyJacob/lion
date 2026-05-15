@@ -743,6 +743,16 @@ class TransitionNet(nn.Module):
         return self.net(torch.cat([state, action_oh], dim=-1))
 
 
+class PolicyNet(nn.Module):
+    """Action probability policy network reusing the TwoStreamNet backbone."""
+    def __init__(self, hidden: int = 48):
+        super().__init__()
+        self._net = TwoStreamNet(out_dim=ACTION_SIZE, hidden=hidden)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.softmax(self._net(x), dim=-1)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 5.  Replay buffer
 # ──────────────────────────────────────────────────────────────────────────────
@@ -959,6 +969,381 @@ class DAIPAgent:
 
         return {'loss': efe_loss.item(), 'trans_loss': trans_loss.item(),
                 'epist_per_action': epist_per_action}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 7b.  DAI-A agent
+# ──────────────────────────────────────────────────────────────────────────────
+
+class DAIAAgent:
+    """
+    DAI-A: active information-theoretic extension of DAI-P.
+
+    EFE target = reward  +  epistemic_weight × active_epistemic_gain
+                         +  γ × EFE(s', a*)
+
+    Active epistemic gain = KL( Q(a|s,s') ‖ Q(a|s) )
+    where Q(a|s,s') is the posterior over actions computed via Bayes' rule:
+        Q(a|s,s') ∝ P(s'|s,a) · Q(a|s)
+    and Q(a|s) is the policy network's prior.
+
+    Requires: EFE net (critic), TransitionNet, PolicyNet.
+    """
+
+    def __init__(self, cfg: dict):
+        self.gamma       = cfg['gamma']
+        self.batch_size  = cfg['batch_size']
+        self.temperature = cfg['temperature']
+        self.target_upd  = cfg['target_update']
+        self.min_mem     = cfg['min_memory_to_train']
+        self.eps_w       = cfg['epistemic_weight']
+        self.device      = torch.device(cfg.get('device', 'cpu'))
+
+        self.efe_net    = TwoStreamNet().to(self.device)
+        self.efe_target = TwoStreamNet().to(self.device)
+        self.efe_target.load_state_dict(self.efe_net.state_dict())
+        self.efe_target.eval()
+        self.efe_opt    = optim.Adam(self.efe_net.parameters(), lr=cfg['lr'])
+
+        self.trans_net  = TransitionNet().to(self.device)
+        self.trans_opt  = optim.Adam(self.trans_net.parameters(), lr=cfg['lr'])
+
+        self.policy_net = PolicyNet().to(self.device)
+        self.policy_opt = optim.Adam(self.policy_net.parameters(), lr=cfg['lr'])
+
+        self.buf    = ReplayBuffer(cfg['memory_size'])
+        self._steps = 0
+        self._eye   = torch.eye(ACTION_SIZE, device=self.device)
+
+    def act(self, state: torch.Tensor) -> int:
+        with torch.no_grad():
+            nefe  = self.efe_net(state.to(self.device)).squeeze()
+            probs = F.softmax(self.temperature * nefe, dim=-1)
+        return torch.multinomial(probs, 1).item()
+
+    def push(self, s, a, r, s2, done):
+        self.buf.push(s.cpu(), torch.tensor(a),
+                      torch.tensor(r, dtype=torch.float32),
+                      s2.cpu(), torch.tensor(done, dtype=torch.bool))
+
+    def train_step(self) -> Optional[Dict[str, float]]:
+        if len(self.buf) < self.min_mem:
+            return None
+        states, actions, rewards, next_states, dones = self.buf.sample(self.batch_size)
+
+        S   = torch.stack(list(states)).to(self.device)
+        A   = torch.stack(list(actions)).to(self.device)
+        R   = torch.stack(list(rewards)).unsqueeze(1).to(self.device)
+        S2  = torch.stack(list(next_states)).to(self.device)
+        D   = torch.stack(list(dones)).unsqueeze(1).to(self.device)
+        AOH = self._eye[A]
+
+        next_proprio = S2[:, STATE_DIM - PROPRIO_DIM:]
+
+        # Policy prior Q(a|s) — computed here so it can be reused for policy loss.
+        policy_prior = self.policy_net(S)  # (B, A)
+
+        # ── active epistemic gain ─────────────────────────────────────────────
+        with torch.no_grad():
+            # log P(s'|s,a) for every action via the transition net
+            exp_a = self._eye.repeat(self.batch_size, 1)         # (B*A, A)
+            exp_s = S.repeat_interleave(ACTION_SIZE, dim=0)      # (B*A, S)
+            pred_nexts = self.trans_net(exp_s, exp_a)            # (B*A, prop)
+            nxt_exp    = next_proprio.repeat_interleave(ACTION_SIZE, dim=0)
+            log_lik = -0.5 * F.mse_loss(
+                pred_nexts, nxt_exp, reduction='none'
+            ).sum(dim=1).view(self.batch_size, ACTION_SIZE)      # (B, A)
+
+            # Bayes update: Q(a|s,s') ∝ P(s'|s,a) · Q(a|s)
+            log_post  = log_lik + torch.log(policy_prior.detach() + 1e-8)
+            posterior = F.softmax(log_post, dim=1).clamp_min(1e-8)
+
+            # KL( posterior ‖ prior )
+            active_epist = (
+                posterior * (torch.log(posterior) - torch.log(policy_prior.detach() + 1e-8))
+            ).sum(dim=1, keepdim=True)  # (B, 1)
+
+        # ── EFE targets ───────────────────────────────────────────────────────
+        with torch.no_grad():
+            a_next      = self.efe_net(S2).argmax(1, keepdim=True)
+            q_next      = self.efe_target(S2).gather(1, a_next)
+            efe_targets = self.efe_net(S).detach().clone()
+            efe_targets[range(self.batch_size), A] = (
+                R.squeeze()
+                + self.eps_w * active_epist.squeeze()
+                + self.gamma * q_next.squeeze() * ~D.squeeze()
+            )
+
+        # ── train EFE net ─────────────────────────────────────────────────────
+        self.efe_net.train()
+        efe_loss = F.mse_loss(self.efe_net(S), efe_targets)
+        self.efe_opt.zero_grad()
+        efe_loss.backward()
+        self.efe_opt.step()
+
+        # ── train transition net ──────────────────────────────────────────────
+        self.trans_net.train()
+        trans_loss = F.mse_loss(self.trans_net(S, AOH), next_proprio)
+        self.trans_opt.zero_grad()
+        trans_loss.backward()
+        self.trans_opt.step()
+
+        # ── train policy net (track Boltzmann policy from critic) ─────────────
+        with torch.no_grad():
+            target_policy = F.softmax(self.temperature * self.efe_net(S).detach(), dim=1)
+        policy_loss = F.mse_loss(policy_prior, target_policy)
+        self.policy_opt.zero_grad()
+        policy_loss.backward()
+        self.policy_opt.step()
+
+        self._steps += 1
+        if self._steps % self.target_upd == 0:
+            self.efe_target.load_state_dict(self.efe_net.state_dict())
+
+        return {'loss': efe_loss.item(), 'trans_loss': trans_loss.item(),
+                'active_epist': active_epist.mean().item()}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 7c.  DAI-SA agent
+# ──────────────────────────────────────────────────────────────────────────────
+
+class DAISAAgent:
+    """
+    DAI-SA: surrogate-active variant.  No TransitionNet required.
+
+    EFE target = reward  +  epistemic_weight × surrogate_active_gain
+                         +  γ × EFE(s', a*)
+
+    Surrogate active gain = ‖Q_φ(a|s) − P(a|s)‖²
+    where P(a|s) is the Boltzmann policy derived from the critic.
+
+    The same MSE serves a dual purpose: as an intrinsic bonus (maximised in the
+    EFE target) and as a supervised loss for the policy net (minimised during
+    training).  The gain is frozen at its current value before the policy update
+    so only the critic target sees the stale divergence.
+    """
+
+    def __init__(self, cfg: dict):
+        self.gamma       = cfg['gamma']
+        self.batch_size  = cfg['batch_size']
+        self.temperature = cfg['temperature']
+        self.target_upd  = cfg['target_update']
+        self.min_mem     = cfg['min_memory_to_train']
+        self.eps_w       = cfg['epistemic_weight']
+        self.device      = torch.device(cfg.get('device', 'cpu'))
+
+        self.efe_net    = TwoStreamNet().to(self.device)
+        self.efe_target = TwoStreamNet().to(self.device)
+        self.efe_target.load_state_dict(self.efe_net.state_dict())
+        self.efe_target.eval()
+        self.efe_opt    = optim.Adam(self.efe_net.parameters(), lr=cfg['lr'])
+
+        self.policy_net = PolicyNet().to(self.device)
+        self.policy_opt = optim.Adam(self.policy_net.parameters(), lr=cfg['lr'])
+
+        self.buf    = ReplayBuffer(cfg['memory_size'])
+        self._steps = 0
+
+    def act(self, state: torch.Tensor) -> int:
+        with torch.no_grad():
+            nefe  = self.efe_net(state.to(self.device)).squeeze()
+            probs = F.softmax(self.temperature * nefe, dim=-1)
+        return torch.multinomial(probs, 1).item()
+
+    def push(self, s, a, r, s2, done):
+        self.buf.push(s.cpu(), torch.tensor(a),
+                      torch.tensor(r, dtype=torch.float32),
+                      s2.cpu(), torch.tensor(done, dtype=torch.bool))
+
+    def train_step(self) -> Optional[Dict[str, float]]:
+        if len(self.buf) < self.min_mem:
+            return None
+        states, actions, rewards, next_states, dones = self.buf.sample(self.batch_size)
+
+        S   = torch.stack(list(states)).to(self.device)
+        A   = torch.stack(list(actions)).to(self.device)
+        R   = torch.stack(list(rewards)).unsqueeze(1).to(self.device)
+        S2  = torch.stack(list(next_states)).to(self.device)
+        D   = torch.stack(list(dones)).unsqueeze(1).to(self.device)
+
+        # Policy prior; target policy uses the critic at this point in time.
+        with torch.no_grad():
+            target_policy = F.softmax(self.temperature * self.efe_net(S), dim=1)
+        policy_prior = self.policy_net(S)  # (B, A) — with grad for policy loss
+
+        # ── surrogate active epistemic gain (frozen divergence) ───────────────
+        with torch.no_grad():
+            surrogate_epist = ((policy_prior.detach() - target_policy) ** 2
+                               ).sum(dim=1, keepdim=True)  # (B, 1)
+
+        # ── EFE targets ───────────────────────────────────────────────────────
+        with torch.no_grad():
+            a_next      = self.efe_net(S2).argmax(1, keepdim=True)
+            q_next      = self.efe_target(S2).gather(1, a_next)
+            efe_targets = self.efe_net(S).detach().clone()
+            efe_targets[range(self.batch_size), A] = (
+                R.squeeze()
+                + self.eps_w * surrogate_epist.squeeze()
+                + self.gamma * q_next.squeeze() * ~D.squeeze()
+            )
+
+        # ── train EFE net ─────────────────────────────────────────────────────
+        self.efe_net.train()
+        efe_loss = F.mse_loss(self.efe_net(S), efe_targets)
+        self.efe_opt.zero_grad()
+        efe_loss.backward()
+        self.efe_opt.step()
+
+        # ── train policy net (minimise divergence from normative policy) ───────
+        with torch.no_grad():
+            target_policy_upd = F.softmax(
+                self.temperature * self.efe_net(S).detach(), dim=1)
+        policy_loss = F.mse_loss(policy_prior, target_policy_upd)
+        self.policy_opt.zero_grad()
+        policy_loss.backward()
+        self.policy_opt.step()
+
+        self._steps += 1
+        if self._steps % self.target_upd == 0:
+            self.efe_target.load_state_dict(self.efe_net.state_dict())
+
+        return {'loss': efe_loss.item(),
+                'surrogate_epist': surrogate_epist.mean().item()}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 7d.  DAI-F agent
+# ──────────────────────────────────────────────────────────────────────────────
+
+class DAIFAgent:
+    """
+    DAI-F: full hybrid combining perceptive and active epistemic gains.
+
+    EFE target = reward  +  epistemic_weight × (perceptive_gain + active_gain)
+                         +  γ × EFE(s', a*)
+
+    Perceptive gain: 0.5 × ‖s'_prop − TransitionNet(s, a)‖²   (same as DAI-P)
+    Active gain:     KL( Q(a|s,s') ‖ Q(a|s) )                 (same as DAI-A)
+
+    Requires: EFE net (critic), TransitionNet, PolicyNet.
+    """
+
+    def __init__(self, cfg: dict):
+        self.gamma       = cfg['gamma']
+        self.batch_size  = cfg['batch_size']
+        self.temperature = cfg['temperature']
+        self.target_upd  = cfg['target_update']
+        self.min_mem     = cfg['min_memory_to_train']
+        self.eps_w       = cfg['epistemic_weight']
+        self.device      = torch.device(cfg.get('device', 'cpu'))
+
+        self.efe_net    = TwoStreamNet().to(self.device)
+        self.efe_target = TwoStreamNet().to(self.device)
+        self.efe_target.load_state_dict(self.efe_net.state_dict())
+        self.efe_target.eval()
+        self.efe_opt    = optim.Adam(self.efe_net.parameters(), lr=cfg['lr'])
+
+        self.trans_net  = TransitionNet().to(self.device)
+        self.trans_opt  = optim.Adam(self.trans_net.parameters(), lr=cfg['lr'])
+
+        self.policy_net = PolicyNet().to(self.device)
+        self.policy_opt = optim.Adam(self.policy_net.parameters(), lr=cfg['lr'])
+
+        self.buf    = ReplayBuffer(cfg['memory_size'])
+        self._steps = 0
+        self._eye   = torch.eye(ACTION_SIZE, device=self.device)
+
+    def act(self, state: torch.Tensor) -> int:
+        with torch.no_grad():
+            nefe  = self.efe_net(state.to(self.device)).squeeze()
+            probs = F.softmax(self.temperature * nefe, dim=-1)
+        return torch.multinomial(probs, 1).item()
+
+    def push(self, s, a, r, s2, done):
+        self.buf.push(s.cpu(), torch.tensor(a),
+                      torch.tensor(r, dtype=torch.float32),
+                      s2.cpu(), torch.tensor(done, dtype=torch.bool))
+
+    def train_step(self) -> Optional[Dict[str, float]]:
+        if len(self.buf) < self.min_mem:
+            return None
+        states, actions, rewards, next_states, dones = self.buf.sample(self.batch_size)
+
+        S   = torch.stack(list(states)).to(self.device)
+        A   = torch.stack(list(actions)).to(self.device)
+        R   = torch.stack(list(rewards)).unsqueeze(1).to(self.device)
+        S2  = torch.stack(list(next_states)).to(self.device)
+        D   = torch.stack(list(dones)).unsqueeze(1).to(self.device)
+        AOH = self._eye[A]
+
+        next_proprio = S2[:, STATE_DIM - PROPRIO_DIM:]
+
+        # Policy prior — computed here so it can be reused for policy loss.
+        policy_prior = self.policy_net(S)  # (B, A)
+
+        with torch.no_grad():
+            # Perceptive epistemic gain (same as DAI-P)
+            pred_next       = self.trans_net(S, AOH)
+            perceptive_epist = 0.5 * ((next_proprio - pred_next) ** 2
+                                      ).sum(dim=1, keepdim=True)
+
+            # Active epistemic gain (same as DAI-A)
+            exp_a      = self._eye.repeat(self.batch_size, 1)
+            exp_s      = S.repeat_interleave(ACTION_SIZE, dim=0)
+            pred_nexts = self.trans_net(exp_s, exp_a)
+            nxt_exp    = next_proprio.repeat_interleave(ACTION_SIZE, dim=0)
+            log_lik    = -0.5 * F.mse_loss(
+                pred_nexts, nxt_exp, reduction='none'
+            ).sum(dim=1).view(self.batch_size, ACTION_SIZE)
+            log_post   = log_lik + torch.log(policy_prior.detach() + 1e-8)
+            posterior  = F.softmax(log_post, dim=1).clamp_min(1e-8)
+            active_epist = (
+                posterior * (torch.log(posterior) - torch.log(policy_prior.detach() + 1e-8))
+            ).sum(dim=1, keepdim=True)
+
+            total_epist = perceptive_epist + active_epist
+
+        # ── EFE targets ───────────────────────────────────────────────────────
+        with torch.no_grad():
+            a_next      = self.efe_net(S2).argmax(1, keepdim=True)
+            q_next      = self.efe_target(S2).gather(1, a_next)
+            efe_targets = self.efe_net(S).detach().clone()
+            efe_targets[range(self.batch_size), A] = (
+                R.squeeze()
+                + self.eps_w * total_epist.squeeze()
+                + self.gamma * q_next.squeeze() * ~D.squeeze()
+            )
+
+        # ── train EFE net ─────────────────────────────────────────────────────
+        self.efe_net.train()
+        efe_loss = F.mse_loss(self.efe_net(S), efe_targets)
+        self.efe_opt.zero_grad()
+        efe_loss.backward()
+        self.efe_opt.step()
+
+        # ── train transition net ──────────────────────────────────────────────
+        self.trans_net.train()
+        trans_loss = F.mse_loss(self.trans_net(S, AOH), next_proprio)
+        self.trans_opt.zero_grad()
+        trans_loss.backward()
+        self.trans_opt.step()
+
+        # ── train policy net ──────────────────────────────────────────────────
+        with torch.no_grad():
+            target_policy = F.softmax(self.temperature * self.efe_net(S).detach(), dim=1)
+        policy_loss = F.mse_loss(policy_prior, target_policy)
+        self.policy_opt.zero_grad()
+        policy_loss.backward()
+        self.policy_opt.step()
+
+        self._steps += 1
+        if self._steps % self.target_upd == 0:
+            self.efe_target.load_state_dict(self.efe_net.state_dict())
+
+        return {'loss': efe_loss.item(), 'trans_loss': trans_loss.item(),
+                'perceptive_epist': perceptive_epist.mean().item(),
+                'active_epist': active_epist.mean().item()}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1196,13 +1581,50 @@ def smooth(xs: List[float], w: int = 15) -> List[float]:
 # 10. Agent factory
 # ──────────────────────────────────────────────────────────────────────────────
 
-AGENTS = ['DDQN', 'DAI-P', 'Break-Even']
+# Stable ordering used for reproducible per-agent seed offsets.  Never reorder.
+_ALL_AGENTS = ['DDQN', 'DAI-P', 'DAI-A', 'DAI-SA', 'DAI-F', 'Break-Even']
+
+# ── Choose which agents to benchmark.  Comment out any you want to skip. ──────
+AGENTS = [
+    'DDQN',
+    'DAI-P',
+    'DAI-A',
+    'DAI-SA',
+    'DAI-F',
+    'Break-Even',
+]
+# ── End of agent selection ────────────────────────────────────────────────────
+
+# Per-agent plot colours and line styles.
+_AGENT_COLOURS = {
+    'DDQN':       '#2196F3',
+    'DAI-P':      '#E91E63',
+    'DAI-A':      '#FF9800',
+    'DAI-SA':     '#9C27B0',
+    'DAI-F':      '#4CAF50',
+    'Break-Even': '#607D8B',
+}
+_AGENT_LS = {
+    'DDQN':       '--',
+    'DAI-P':      '-',
+    'DAI-A':      '-.',
+    'DAI-SA':     ':',
+    'DAI-F':      (0, (5, 2, 1, 2)),
+    'Break-Even': (0, (1, 1)),
+}
+
+# Agents that use a transition net (have 'trans_loss' in their train_step return).
+_HAS_TRANS = {'DAI-P', 'DAI-A', 'DAI-F'}
 
 
 def make_agent(name: str, cfg: dict):
-    if name == 'DDQN':      return DDQNAgent(cfg)
-    if name == 'DAI-P':     return DAIPAgent(cfg)
-    return BreakEvenAgent()
+    if name == 'DDQN':       return DDQNAgent(cfg)
+    if name == 'DAI-P':      return DAIPAgent(cfg)
+    if name == 'DAI-A':      return DAIAAgent(cfg)
+    if name == 'DAI-SA':     return DAISAAgent(cfg)
+    if name == 'DAI-F':      return DAIFAgent(cfg)
+    if name == 'Break-Even': return BreakEvenAgent()
+    raise ValueError(f'Unknown agent: {name}. Choose from {_ALL_AGENTS}')
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1226,9 +1648,9 @@ def _run_one(task: dict) -> dict:
     # Re-load .env in each subprocess (spawn doesn't inherit env mutations)
     load_dotenv(env_file)
 
-    torch.manual_seed(seed + 1000 * AGENTS.index(agent_name))
-    random.seed(seed + 1000 * AGENTS.index(agent_name))
-    np.random.seed(seed + 1000 * AGENTS.index(agent_name))
+    torch.manual_seed(seed + 1000 * _ALL_AGENTS.index(agent_name))
+    random.seed(seed + 1000 * _ALL_AGENTS.index(agent_name))
+    np.random.seed(seed + 1000 * _ALL_AGENTS.index(agent_name))
 
     device = torch.device(cfg['device'])
 
@@ -1269,8 +1691,9 @@ def _run_one(task: dict) -> dict:
                     f'win={np.mean(ep_wins[sl]):.2f}  '
                     f'lA={np.mean(ep_labelA[sl]):.2f}  '
                     f'loss={stats.mean_loss:.4f}')
-            if agent_name == 'DAI-P':
+            if agent_name in _HAS_TRANS:
                 line += f'  tloss={stats.mean_trans_loss:.4f}'
+            if agent_name == 'DAI-P':
                 line += f'  epist_buyA={stats.epist_buy_per_cluster.get(0, 0.0):.4f}'
             print(line, flush=True)
 
@@ -1279,13 +1702,14 @@ def _run_one(task: dict) -> dict:
                   n_labels=stats.n_labels, label_A=int(stats.labels[0]),
                   budget_final=stats.budget_final, n_steps=stats.n_steps,
                   loss=stats.mean_loss)
-        if agent_name == 'DAI-P':
+        if agent_name in _HAS_TRANS:
             wm['trans_loss'] = stats.mean_trans_loss
+        if agent_name == 'DAI-P':
             for a_idx, a_name in {0: 'block', 1: 'accept'}.items():
                 wm[f'epistemic_gains/{a_name}'] = stats.epist_per_action.get(a_idx, 0.0)
             _cluster_names = {0: 'A', 1: 'B', 2: 'C', 3: 'D'}
-            for uid, name in _cluster_names.items():
-                wm[f'epistemic_gains/buy_{name}'] = stats.epist_buy_per_cluster.get(uid, 0.0)
+            for uid, cname in _cluster_names.items():
+                wm[f'epistemic_gains/buy_{cname}'] = stats.epist_buy_per_cluster.get(uid, 0.0)
 
         if at_log and wlog.active:
             wm.update(_space_scatter_figs(stats, seed))
@@ -1323,6 +1747,7 @@ def run_experiment(
     cfg:           dict,
     gpus:          List[str],
     workers_per_gpu: int,
+    agents:        Optional[List[str]] = None,
     verbose:       bool = True,
     log_interval:  int  = 50,
     wandb_project: Optional[str] = None,
@@ -1330,9 +1755,11 @@ def run_experiment(
     wandb_group:   Optional[str] = None,
     env_file:      str  = '.env',
 ) -> dict:
+    if agents is None:
+        agents = AGENTS
     results = {name: {'rewards': [], 'wins': [], 'n_labels': [],
                       'label_A': [], 'budget': []}
-               for name in AGENTS}
+               for name in agents}
 
     if wandb_group is None:
         wandb_group = f'synthetic-lion-{int(time.time())}'
@@ -1360,7 +1787,7 @@ def run_experiment(
 
     tasks = []
     for seed in seeds:
-        for agent_name in AGENTS:
+        for agent_name in agents:
             device_str = next(slot_cycle)
             tasks.append(dict(
                 seed         = seed,
@@ -1377,6 +1804,7 @@ def run_experiment(
     n_workers = len(gpus) * workers_per_gpu
     print(f'\n  Dispatching {len(tasks)} jobs across {n_workers} worker(s) '
           f'on: {gpus}  (×{workers_per_gpu} per GPU)')
+    print(f'  Active agents: {agents}')
     for t in tasks:
         print(f'    seed={t["seed"]}  {t["agent_name"]:10s}  → {t["cfg"]["device"]}')
     print()
@@ -1407,6 +1835,7 @@ def run_experiment(
 # ──────────────────────────────────────────────────────────────────────────────
 
 def plot_results(results: dict, n_episodes: int,
+                 agents: Optional[List[str]] = None,
                  out_path: str = 'synthetic_lion_results.png') -> str:
     try:
         import matplotlib
@@ -1416,16 +1845,18 @@ def plot_results(results: dict, n_episodes: int,
         print('matplotlib not available – skipping plot.')
         return ''
 
-    colours  = {'DDQN': '#2196F3', 'DAI-P': '#E91E63', 'Break-Even': '#4CAF50'}
-    ls_map   = {'DDQN': '--',       'DAI-P': '-',       'Break-Even': ':'}
+    if agents is None:
+        agents = list(results.keys())
+
     smooth_w = max(1, n_episodes // 20)
     xs       = np.arange(n_episodes)
 
     fig, axes = plt.subplots(2, 3, figsize=(16, 9))
     n_seeds = len(next(iter(results.values()))['wins'])
+    agent_label = ' vs. '.join(agents)
     fig.suptitle(
-        f'Synthetic LION — DDQN vs. DAI-P vs. Break-Even  ({n_seeds} seeds)',
-        fontsize=13, fontweight='bold'
+        f'Synthetic LION — {agent_label}  ({n_seeds} seeds)',
+        fontsize=11, fontweight='bold'
     )
 
     metrics = [
@@ -1437,14 +1868,16 @@ def plot_results(results: dict, n_episodes: int,
     ]
 
     for key, title, ylabel, ax in metrics:
-        for name in AGENTS:
+        for name in agents:
             arr = np.array(results[name][key], dtype=float)
             mu  = arr.mean(0)
             se  = arr.std(0) / max(1, math.sqrt(arr.shape[0]))
             smu = np.array(smooth(list(mu), smooth_w))
             sse = np.array(smooth(list(se), smooth_w))
-            ax.plot(xs, smu, label=name, color=colours[name], lw=2.2, ls=ls_map[name])
-            ax.fill_between(xs, smu - sse, smu + sse, alpha=0.18, color=colours[name])
+            colour = _AGENT_COLOURS.get(name, '#333333')
+            ls     = _AGENT_LS.get(name, '-')
+            ax.plot(xs, smu, label=name, color=colour, lw=2.2, ls=ls)
+            ax.fill_between(xs, smu - sse, smu + sse, alpha=0.18, color=colour)
         ax.axvline(50, color='grey', lw=0.8, ls='--', alpha=0.6)
         ax.text(52, ax.get_ylim()[0], 'ep 50', fontsize=7, color='grey')
         ax.set_title(title, fontsize=10)
@@ -1513,15 +1946,29 @@ def main():
     parser.add_argument('--env-file',          type=str,  default='.env')
     parser.add_argument('--plot-path',         type=str,
                         default='synthetic_lion_results.png')
+    parser.add_argument('--agents',            type=str,  default=None,
+                        help='Comma-separated agents to benchmark, e.g. '
+                             '"DDQN,DAI-P".  Overrides the AGENTS list in '
+                             f'the script.  Choices: {_ALL_AGENTS}')
     args = parser.parse_args()
 
     load_dotenv(args.env_file)
 
     gpus = _parse_gpus(args.gpus, args.min_free_gpu_gb)
 
+    # Resolve active agent list: CLI --agents overrides the script-level AGENTS.
+    if args.agents is not None:
+        active_agents = [a.strip() for a in args.agents.split(',')]
+        unknown = [a for a in active_agents if a not in _ALL_AGENTS]
+        if unknown:
+            parser.error(f'Unknown agents: {unknown}. Choose from {_ALL_AGENTS}')
+    else:
+        active_agents = AGENTS
+
     print('=' * 65)
     print(' Synthetic LION experiment')
     print(f'  Episodes : {args.episodes}   Seeds : {args.seeds}')
+    print(f'  Agents   : {active_agents}')
     print(f'  GPUs     : {gpus}   Workers/GPU : {args.workers_per_gpu}')
     if args.wandb_project:
         print(f'  W&B      : project={args.wandb_project}  '
@@ -1546,6 +1993,7 @@ def main():
         cfg             = CFG,
         gpus            = gpus,
         workers_per_gpu = args.workers_per_gpu,
+        agents          = active_agents,
         verbose         = args.verbose,
         log_interval    = args.log_interval,
         wandb_project   = args.wandb_project,
@@ -1566,7 +2014,7 @@ def main():
         print('─' * 65)
         print(header)
         print('─' * 65)
-        for name in AGENTS:
+        for name in active_agents:
             rews    = np.array(results[name]['rewards'])[:, slc].mean()
             arr_w   = np.array(results[name]['wins'])[:, slc]
             wins    = arr_w.mean()
@@ -1577,10 +2025,11 @@ def main():
         print('─' * 65)
 
     print(f'\nTotal wall-clock time: {elapsed:.1f}s  '
-          f'({elapsed / (args.seeds * len(AGENTS)):.1f}s per run avg)')
+          f'({elapsed / (args.seeds * len(active_agents)):.1f}s per run avg)')
 
     if not args.no_plot:
-        plot_results(results, args.episodes, out_path=args.plot_path)
+        plot_results(results, args.episodes,
+                     agents=active_agents, out_path=args.plot_path)
 
 
 if __name__ == '__main__':
