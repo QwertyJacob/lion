@@ -123,7 +123,7 @@ CFG = dict(
     # spending 6 of 15 up front; then can only afford C (4) and is stuck with
     # 5 left—not enough for A (5 exact) if any A-flow has already drained budget.
     # DAI-P's epistemic gain pushes it to buy A first despite A's low anomaly score.
-    max_steps    = 150,
+    max_steps    = 50,
     init_budget  = 15.0,
     min_budget   = 0.0,
     max_budget   = 40.0,
@@ -158,10 +158,10 @@ CFG = dict(
     batch_size   = 64,
     memory_size  = 6000,
     target_update = 20,       # steps between target-net hard updates
-    temperature  = 2.0,       # Boltzmann temperature (DAI-P only)
+    temperature  = 100,       # Boltzmann temperature (DAI variants)
     min_memory_to_train = 128,
     # DDQN ε-greedy exploration
-    epsilon_start = 1.0,
+    epsilon_start = 0.25,     # low exploration for good comparison
     epsilon_end   = 0.05,
     epsilon_decay = 0.9995,   # multiplicative decay per training step
 
