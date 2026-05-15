@@ -599,12 +599,21 @@ class SyntheticLIONEnv:
         known_pred_norm = f['pred_k'] / max(self.inf.known_protos.shape[0] - 1, 1)
         known_conf_norm = f['conf_k']
         anorm_norm      = min(f['anorm_score'] / 5.0, 1.0)
+        """
+        # realism gap 1:
+        # we sould have here a dimensionality reduced of latent "up"
         if f['unknown_id'] is not None:
             up = self.inf.unk_protos[f['cid']].detach().cpu().numpy()
         else:
             up = self.inf.known_protos[f['pred_k']].detach().cpu().numpy()
-        proto_x = float(up[0]) / 5.0
-        proto_y = float(up[1]) / 5.0
+
+        proto_x = fist component of pca transform of up
+        proto_y = second component of pca transform of up
+        
+        # instead we use the input space cuz it's bi dimensional:
+        """
+        proto_x = float(f['x'][0]) / 5.0
+        proto_y = float(f['x'][1]) / 5.0
 
         # Proprioceptive (9): 4 per-cluster EMA confidences + 5 scalars
         # Zeroed for clusters whose label has already been bought (resolved).
