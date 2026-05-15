@@ -902,9 +902,8 @@ class DAIPAgent:
 
     def act(self, state: torch.Tensor) -> int:
         with torch.no_grad():
-            nefe  = self.efe_net(state.to(self.device)).squeeze()
-            probs = F.softmax(self.temperature * nefe, dim=-1)
-        return torch.multinomial(probs, 1).item()
+            nefe = self.efe_net(state.to(self.device)).squeeze()
+        return nefe.argmax().item()
 
     def compute_epist(self, state: torch.Tensor, action: int,
                       next_state: torch.Tensor) -> float:
@@ -1026,9 +1025,8 @@ class DAIAAgent:
 
     def act(self, state: torch.Tensor) -> int:
         with torch.no_grad():
-            nefe  = self.efe_net(state.to(self.device)).squeeze()
-            probs = F.softmax(self.temperature * nefe, dim=-1)
-        return torch.multinomial(probs, 1).item()
+            nefe = self.efe_net(state.to(self.device)).squeeze()
+        return nefe.argmax().item()
 
     def compute_epist(self, state: torch.Tensor, action: int,
                       next_state: torch.Tensor) -> float:
@@ -1179,9 +1177,8 @@ class DAISAAgent:
 
     def act(self, state: torch.Tensor) -> int:
         with torch.no_grad():
-            nefe  = self.efe_net(state.to(self.device)).squeeze()
-            probs = F.softmax(self.temperature * nefe, dim=-1)
-        return torch.multinomial(probs, 1).item()
+            nefe = self.efe_net(state.to(self.device)).squeeze()
+        return nefe.argmax().item()
 
     def compute_epist(self, state: torch.Tensor, action: int,
                       next_state: torch.Tensor) -> float:
@@ -1304,9 +1301,8 @@ class DAIFAgent:
 
     def act(self, state: torch.Tensor) -> int:
         with torch.no_grad():
-            nefe  = self.efe_net(state.to(self.device)).squeeze()
-            probs = F.softmax(self.temperature * nefe, dim=-1)
-        return torch.multinomial(probs, 1).item()
+            nefe = self.efe_net(state.to(self.device)).squeeze()
+        return nefe.argmax().item()
 
     def compute_epist(self, state: torch.Tensor, action: int,
                       next_state: torch.Tensor) -> float:
