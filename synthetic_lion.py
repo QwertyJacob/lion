@@ -1795,7 +1795,7 @@ class SACAgent:
         # ── Temperature update ─────────────────────────────────────────────────
         with torch.no_grad():
             entropy = -(probs.detach() * log_probs.detach()).sum(1)
-        alpha_loss = -(self.log_alpha * (entropy - self.target_entropy)).mean()
+        alpha_loss = (self.log_alpha * (entropy - self.target_entropy)).mean()
         self.alpha_opt.zero_grad()
         alpha_loss.backward()
         self.alpha_opt.step()
