@@ -25,37 +25,29 @@ Weights & Biases logging
 One W&B run is created per (seed × agent) under a shared group tag so the UI
 can aggregate statistics across seeds.
 
-Why DAI-P should beat DDQN here
----------------------------------
-Unknown class A (malicious) overlaps in 2-D with Known Benign 0, so the
-inference module initially classifies A-type flows as benign with HIGH
-confidence (low anomaly score).  The agent therefore accepts them and bleeds
-budget.  Once label-A is purchased, the inference module immediately adds A's
-prototype to its known-class roster: A-type flows flip from "high-confidence
-benign" to "high-confidence malicious A", producing the LARGEST possible
-one-step change in the proprioceptive state
-(known-class confidence, anomaly score, n_labels_bought, budget).
-Because this transition is maximally surprising, the DAI-P transition model
-carries a high residual prediction error—high perceptive-epistemic gain—for
-the buy-label-A action, driving the agent to execute it early.
+Why DAI agents outperform pure reward-driven baselines
+-------------------------------------------------------
+The environment requires strategically allocating a limited CTI budget across
+four unknown threat clusters with heterogeneous properties.  Because the total
+label cost exceeds the initial budget, the agent must decide which labels to
+acquire, in what order, and when — while simultaneously managing incoming flows
+under uncertainty.  Pure reward-driven agents (DDQN and variants) must discover
+good label-acquisition strategies through delayed reward signals alone.
 
-DDQN explores with ε-greedy and relies on discovering the reward signal of
-label-A through trial and error.  It can eventually converge, but it loses
-critical budget in the early episodes.
+DAI agents augment the reward signal with an epistemic gain term that measures
+how surprising a transition is relative to the agent's learned world model.
+When buying a label causes a large change in the proprioceptive state (cluster
+confidence slots, budget, label count), the transition network incurs high
+residual prediction error — high perceptive-epistemic gain — making that
+purchase intrinsically valuable before the downstream reward signal alone would
+justify it.  This immediate, model-based signal provides faster credit
+assignment than relying on multi-step reward propagation.
 
-The Break-Even agent buys the label with the HIGHEST anomaly score first
-(the natural heuristic).  Unknown A has the LOWEST anomaly score (it looks
-benign), so the Break-Even agent consistently de-prioritises it—buying B or
-C first—and suffers the same budget haemorrhage as naive DDQN
-
-The epistemic gain is NOT foreknowledge — it is learned across episodes.
-The first time the agent happens to buy label A (via Boltzmann exploration),
-the transition network fails to predict the ensuing proprioceptive flip and
-incurs a large MSE.  This error augments the EFE target for buy-label-A,
-raising its intrinsic value.  Subsequent episodes make the agent more likely
-to repeat the purchase, generating more confirmatory replay data.  The signal
-is immediate (one-step MSE) rather than delayed (downstream reward), which is
-why DAI-P learns the priority of label-A faster than DDQN.
+The epistemic gain is NOT foreknowledge — it is learned across episodes from
+replay data.  The transition network learns which label purchases cause the
+largest proprioceptive state changes, and the EFE targets for those actions
+are raised accordingly.  The signal is immediate (one-step MSE) rather than
+delayed (downstream reward).
 
 Architecture overview
 ---------------------
@@ -118,11 +110,8 @@ CFG = dict(
 
     # Episode
     # Budget is tight: total label cost = 5+6+4+4 = 19 > init_budget of 15.
-    # The agent can afford at most 2-3 labels. It MUST choose which ones.
-    # Break-Even always buys the highest-anomaly-score label first (= B),
-    # spending 6 of 15 up front; then can only afford C (4) and is stuck with
-    # 5 left—not enough for A (5 exact) if any A-flow has already drained budget.
-    # DAI-P's epistemic gain pushes it to buy A first despite A's low anomaly score.
+    # The agent can afford at most 2-3 labels and must choose which ones to buy
+    # and in what order — the core strategic decision of the task.
     max_steps    = 30,
     init_budget  = 8.0,
     min_budget   = 0.0,
@@ -138,16 +127,15 @@ CFG = dict(
     r_accept_malicious_informed = -5.0,
     r_block_malicious_informed  =  2.5,
 
-    # unknown flows before label is bought
-    # A: overlapping-malicious, B: separate-malicious, C: separate-benign, D: near-malicious-benign
-    r_accept_A_uninformed =  -7.0,   # agent is fooled: thinks it's benign, accepts
-    r_block_A_uninformed  =   0.5,   # accidental good block
-    r_accept_B_uninformed =  -3.5,   # anomaly visible, but accepting possible
-    r_block_B_uninformed  =   1.5,   # anomaly detected and blocked
-    r_accept_C_uninformed =   0.5,   # benign but looks anomalous → OK to accept
-    r_block_C_uninformed  =  -1.5,   # false positive on benign
-    r_accept_D_uninformed =   0.5,   # benign, near malicious → sometimes accepted
-    r_block_D_uninformed  =  -1.0,   # false positive
+    # unknown flows before label is bought  (A, B, C, D)
+    r_accept_A_uninformed =  -7.0,   # malicious, overlaps benign K0 in feature space
+    r_block_A_uninformed  =   0.5,
+    r_accept_B_uninformed =  -3.5,   # malicious, clearly anomalous
+    r_block_B_uninformed  =   1.5,
+    r_accept_C_uninformed =   0.5,   # benign, clearly anomalous
+    r_block_C_uninformed  =  -1.5,
+    r_accept_D_uninformed =   0.5,   # benign, near malicious K2
+    r_block_D_uninformed  =  -1.0,
 
     # penalty for buying an invalid label
     buy_invalid_penalty  = -0.3,
@@ -732,11 +720,10 @@ class TransitionNet(nn.Module):
     """
     Predicts the next PROPRIOCEPTIVE state (9-D) given (state, action-one-hot).
 
-    With four per-cluster confidence slots in proprio, the transition net can
-    learn clean cluster-specific update rules:
-      - buy-label-A  → conf_unk_0 → 0, others unchanged
-      - accept A-flow → conf_unk_0 updates via EMA, others unchanged
-    This sharpens the epistemic gain signal for the buy-label-A action.
+    With four per-cluster confidence slots in proprio, the transition net learns
+    cluster-specific update rules: buying a label zeroes that cluster's confidence
+    slot while leaving others unchanged, producing a sharp and localised
+    proprioceptive change that generates high epistemic gain for that action.
     """
     def __init__(self, hidden: int = 48):
         super().__init__()
@@ -870,12 +857,11 @@ class DAIPAgent:
     Epistemic gain = 0.5 × ||next_proprio − TransitionNet(s, a)||²
 
     The transition network is trained concurrently on supervised next-proprio
-    prediction.  With four per-cluster confidence slots in the proprioceptive
-    state, the transition network learns that buying label-A zeroes conf_unk_0
-    while leaving the other slots intact — a clean, cluster-specific signal.
-    This failure to predict the post-buy state produces high epistemic gain,
-    driving the agent to prioritise label-A purchases before the reward signal
-    alone would justify it.
+    prediction.  Label purchases that cause large proprioceptive state changes
+    produce high residual prediction error — high epistemic gain — making those
+    purchases intrinsically valuable before the downstream reward signal alone
+    would justify them.  The signal is immediate (one-step MSE) rather than
+    delayed (multi-step reward propagation).
     """
 
     def __init__(self, cfg: dict):
@@ -1424,6 +1410,408 @@ class DAIFAgent:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# 7e.  Dueling Double-DQN agent
+# ──────────────────────────────────────────────────────────────────────────────
+
+class DuelingNet(nn.Module):
+    """
+    Dueling architecture: shared two-stream backbone with separate value V(s)
+    and advantage A(s,a) heads.  Q(s,a) = V(s) + A(s,a) − mean_a A(s,a).
+
+    Decoupling V from A reduces variance of Q estimates in states where the
+    choice of action has little effect on value — common in early episodes when
+    no labels have been purchased yet.
+    """
+    def __init__(self, hidden: int = 48):
+        super().__init__()
+        extero_dim  = STATE_DIM - PROPRIO_DIM
+        proprio_dim = PROPRIO_DIM
+        self._h2    = hidden // 2
+
+        self.ext_fc1 = nn.Linear(extero_dim,      hidden)
+        self.ext_fc2 = nn.Linear(hidden,           hidden // 2)
+        self.pro_fc1 = nn.Linear(proprio_dim,      hidden)
+        self.pro_fc2 = nn.Linear(hidden,           hidden // 2 * 2)
+
+        feat_dim = hidden // 2 + hidden // 2   # 24 + 24 = 48
+
+        self.val_fc  = nn.Linear(feat_dim, hidden // 2)
+        self.val_out = nn.Linear(hidden // 2, 1)
+
+        self.adv_fc  = nn.Linear(feat_dim, hidden // 2)
+        self.adv_out = nn.Linear(hidden // 2, ACTION_SIZE)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+        e = x[:, :STATE_DIM - PROPRIO_DIM]
+        p = x[:, STATE_DIM - PROPRIO_DIM:]
+        e = F.relu(self.ext_fc1(e))
+        e = F.relu(self.ext_fc2(e))
+        p = F.relu(self.pro_fc1(p))
+        p = F.relu(self.pro_fc2(p))
+        p = p[:, :self._h2]
+        feat = torch.cat([e, p], dim=-1)
+
+        v = self.val_out(F.relu(self.val_fc(feat)))
+        a = self.adv_out(F.relu(self.adv_fc(feat)))
+        return v + a - a.mean(dim=1, keepdim=True)
+
+
+class DuelingDDQNAgent:
+    """
+    Dueling Double-DQN with ε-greedy exploration.
+
+    Replaces the single-head Q-net with a DuelingNet that separates state value
+    V(s) from action advantages A(s,a).  Training loop is otherwise identical
+    to DDQNAgent, making this a clean architectural ablation of the dueling trick.
+    """
+
+    def __init__(self, cfg: dict):
+        self.gamma       = cfg['gamma']
+        self.batch_size  = cfg['batch_size']
+        self.target_upd  = cfg['target_update']
+        self.min_mem     = cfg['min_memory_to_train']
+        self.epsilon     = cfg.get('epsilon_start', 1.0)
+        self.epsilon_end = cfg.get('epsilon_end',   0.05)
+        self.epsilon_dec = cfg.get('epsilon_decay', 0.9995)
+        self.device      = torch.device(cfg.get('device', 'cpu'))
+
+        self.net    = DuelingNet().to(self.device)
+        self.target = DuelingNet().to(self.device)
+        self.target.load_state_dict(self.net.state_dict())
+        self.target.eval()
+        self.opt    = optim.Adam(self.net.parameters(), lr=cfg['lr'])
+        self.buf    = ReplayBuffer(cfg['memory_size'])
+        self._steps = 0
+
+    def act(self, state: torch.Tensor) -> int:
+        if random.random() < self.epsilon:
+            return random.randrange(ACTION_SIZE)
+        with torch.no_grad():
+            return self.net(state.to(self.device)).squeeze().argmax().item()
+
+    def push(self, s, a, r, s2, done):
+        self.buf.push(s.cpu(), torch.tensor(a),
+                      torch.tensor(r, dtype=torch.float32),
+                      s2.cpu(), torch.tensor(done, dtype=torch.bool))
+
+    def train_step(self) -> Optional[Dict[str, float]]:
+        if len(self.buf) < self.min_mem:
+            return None
+        states, actions, rewards, next_states, dones = self.buf.sample(self.batch_size)
+
+        S  = torch.stack(list(states)).to(self.device)
+        A  = torch.stack(list(actions)).to(self.device)
+        R  = torch.stack(list(rewards)).unsqueeze(1).to(self.device)
+        S2 = torch.stack(list(next_states)).to(self.device)
+        D  = torch.stack(list(dones)).unsqueeze(1).to(self.device)
+
+        with torch.no_grad():
+            a_next       = self.net(S2).argmax(1, keepdim=True)
+            q_next       = self.target(S2).gather(1, a_next)
+            targets_full = self.net(S).detach()
+            targets_full[range(self.batch_size), A] = (
+                R.squeeze() + self.gamma * q_next.squeeze() * ~D.squeeze()
+            )
+
+        self.net.train()
+        loss = F.mse_loss(self.net(S), targets_full)
+        self.opt.zero_grad()
+        loss.backward()
+        self.opt.step()
+
+        self._steps += 1
+        if self._steps % self.target_upd == 0:
+            self.target.load_state_dict(self.net.state_dict())
+        self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_dec)
+        return {'loss': loss.item()}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 7f.  PPO agent
+# ──────────────────────────────────────────────────────────────────────────────
+
+class _PPORollout:
+    """On-policy rollout buffer for one episode."""
+
+    def __init__(self):
+        self.states:    List[torch.Tensor] = []
+        self.actions:   List[int]          = []
+        self.rewards:   List[float]        = []
+        self.log_probs: List[float]        = []
+        self.values:    List[float]        = []
+        self.dones:     List[bool]         = []
+
+    def push(self, state, action, reward, log_prob, value, done):
+        self.states.append(state)
+        self.actions.append(action)
+        self.rewards.append(reward)
+        self.log_probs.append(log_prob)
+        self.values.append(value)
+        self.dones.append(done)
+
+    def clear(self):
+        self.__init__()
+
+    def __len__(self):
+        return len(self.states)
+
+
+class PPOAgent:
+    """
+    Proximal Policy Optimisation (discrete action space).
+
+    Transitions are accumulated over one full episode; at episode end
+    train_step() runs n_epochs of clipped-surrogate + value + entropy losses
+    with GAE advantage estimation, then clears the rollout buffer.
+
+    Key hyper-parameters (taken from CFG with fallbacks):
+      ppo_gae_lambda  0.95   GAE λ
+      ppo_clip_eps    0.20   PPO ε
+      ppo_epochs      4      gradient epochs per episode
+      ppo_vf_coef     0.50   value-loss coefficient
+      ppo_ent_coef    0.01   entropy bonus coefficient
+    """
+
+    def __init__(self, cfg: dict):
+        self.gamma      = cfg['gamma']
+        self.device     = torch.device(cfg.get('device', 'cpu'))
+        self.gae_lambda = cfg.get('ppo_gae_lambda', 0.95)
+        self.clip_eps   = cfg.get('ppo_clip_eps',   0.20)
+        self.n_epochs   = cfg.get('ppo_epochs',     4)
+        self.vf_coef    = cfg.get('ppo_vf_coef',    0.50)
+        self.ent_coef   = cfg.get('ppo_ent_coef',   0.01)
+
+        self.actor  = TwoStreamNet(out_dim=ACTION_SIZE).to(self.device)
+        self.critic = TwoStreamNet(out_dim=1).to(self.device)
+        self.opt    = optim.Adam(
+            list(self.actor.parameters()) + list(self.critic.parameters()),
+            lr=cfg['lr'],
+        )
+
+        self.rollout        = _PPORollout()
+        self._last_log_prob = 0.0
+        self._last_value    = 0.0
+        self._episode_done  = False
+
+    def act(self, state: torch.Tensor) -> int:
+        s = state.to(self.device)
+        with torch.no_grad():
+            probs  = F.softmax(self.actor(s).squeeze(), dim=-1)
+            dist   = torch.distributions.Categorical(probs)
+            action = dist.sample()
+            self._last_log_prob = dist.log_prob(action).item()
+            self._last_value    = self.critic(s).squeeze().item()
+        return action.item()
+
+    def push(self, s, a, r, s2, done):
+        self.rollout.push(
+            s.cpu(), a, float(r),
+            self._last_log_prob, self._last_value,
+            bool(done),
+        )
+        self._episode_done = bool(done)
+
+    def train_step(self) -> Optional[Dict[str, float]]:
+        if not self._episode_done or len(self.rollout) == 0:
+            return None
+        self._episode_done = False
+
+        T       = len(self.rollout)
+        states  = torch.stack(self.rollout.states).to(self.device)
+        actions = torch.tensor(self.rollout.actions,   dtype=torch.long,    device=self.device)
+        old_lps = torch.tensor(self.rollout.log_probs, dtype=torch.float32, device=self.device)
+        values  = torch.tensor(self.rollout.values,    dtype=torch.float32, device=self.device)
+        rewards = self.rollout.rewards
+        dones   = self.rollout.dones
+
+        # GAE advantage estimation
+        advs     = torch.zeros(T, device=self.device)
+        last_gae = 0.0
+        for t in reversed(range(T)):
+            next_v   = 0.0 if dones[t] else (float(values[t + 1]) if t + 1 < T else 0.0)
+            delta    = rewards[t] + self.gamma * next_v - float(values[t])
+            last_gae = delta + self.gamma * self.gae_lambda * (0.0 if dones[t] else last_gae)
+            advs[t]  = last_gae
+
+        returns = (advs + values).detach()
+        advs    = ((advs - advs.mean()) / (advs.std() + 1e-8)).detach()
+
+        all_losses = []
+        for _ in range(self.n_epochs):
+            probs    = F.softmax(self.actor(states), dim=-1)
+            dist     = torch.distributions.Categorical(probs)
+            new_lps  = dist.log_prob(actions)
+            entropy  = dist.entropy().mean()
+
+            ratios   = (new_lps - old_lps).exp()
+            surr1    = ratios * advs
+            surr2    = ratios.clamp(1.0 - self.clip_eps, 1.0 + self.clip_eps) * advs
+            pol_loss = -torch.min(surr1, surr2).mean()
+
+            val_loss = F.mse_loss(self.critic(states).squeeze(), returns)
+
+            loss = pol_loss + self.vf_coef * val_loss - self.ent_coef * entropy
+            self.opt.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(
+                list(self.actor.parameters()) + list(self.critic.parameters()), 0.5,
+            )
+            self.opt.step()
+            all_losses.append(loss.item())
+
+        self.rollout.clear()
+        return {'loss': float(np.mean(all_losses))}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 7g.  SAC agent  (discrete action space, Christodoulou 2019)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class SACAgent:
+    """
+    Soft Actor-Critic for discrete actions (Christodoulou 2019).
+
+    Objective: max E[Σ γ^t (r_t + α H(π(·|s_t)))]
+
+    The entropy-maximisation objective is conceptually related to the
+    free-energy principle underlying Active Inference: both incentivise the
+    agent to maintain broad action distributions and avoid premature commitment,
+    which is beneficial when the cost of misidentifying Unknown-A has not yet
+    been learned from reward alone.
+
+    Discrete Q-backup (all actions evaluated in one forward pass):
+      V(s') = Σ_a π(a|s') [min(Q1,Q2)(s',a) − α log π(a|s')]
+      y     = r + γ(1−d) V(s')
+
+    Actor loss:
+      L_π = Σ_a π(a|s) [α log π(a|s) − min(Q1,Q2)(s,a)]
+
+    Temperature (auto-tuned):
+      L_α = −α [H(π(·|s)) − H_target]
+      H_target = sac_entropy_ratio × log |A|
+    """
+
+    def __init__(self, cfg: dict):
+        self.gamma      = cfg['gamma']
+        self.batch_size = cfg['batch_size']
+        self.target_upd = cfg['target_update']
+        self.min_mem    = cfg['min_memory_to_train']
+        self.device     = torch.device(cfg.get('device', 'cpu'))
+        self.lr         = cfg['lr']
+        self.tau        = cfg.get('sac_tau',           0.005)
+        entropy_ratio   = cfg.get('sac_entropy_ratio', 0.6)
+
+        self.target_entropy = math.log(ACTION_SIZE) * entropy_ratio
+
+        # Actor
+        self.actor     = TwoStreamNet(out_dim=ACTION_SIZE).to(self.device)
+        self.actor_opt = optim.Adam(self.actor.parameters(), lr=self.lr)
+
+        # Twin critics + target twins (polyak-averaged)
+        self.q1     = TwoStreamNet(out_dim=ACTION_SIZE).to(self.device)
+        self.q2     = TwoStreamNet(out_dim=ACTION_SIZE).to(self.device)
+        self.q1_tgt = TwoStreamNet(out_dim=ACTION_SIZE).to(self.device)
+        self.q2_tgt = TwoStreamNet(out_dim=ACTION_SIZE).to(self.device)
+        self.q1_tgt.load_state_dict(self.q1.state_dict())
+        self.q2_tgt.load_state_dict(self.q2.state_dict())
+        self.q1_tgt.eval()
+        self.q2_tgt.eval()
+        self.q_opt = optim.Adam(
+            list(self.q1.parameters()) + list(self.q2.parameters()), lr=self.lr,
+        )
+
+        # Learnable log-temperature α
+        self.log_alpha = torch.tensor(
+            math.log(cfg.get('sac_init_alpha', 0.1)),
+            device=self.device, requires_grad=True,
+        )
+        self.alpha_opt = optim.Adam([self.log_alpha], lr=self.lr)
+
+        self.buf    = ReplayBuffer(cfg['memory_size'])
+        self._steps = 0
+
+    @property
+    def _alpha(self) -> torch.Tensor:
+        return self.log_alpha.exp()
+
+    def act(self, state: torch.Tensor) -> int:
+        with torch.no_grad():
+            probs = F.softmax(self.actor(state.to(self.device)).squeeze(), dim=-1)
+        return torch.distributions.Categorical(probs).sample().item()
+
+    def push(self, s, a, r, s2, done):
+        self.buf.push(s.cpu(), torch.tensor(a),
+                      torch.tensor(r, dtype=torch.float32),
+                      s2.cpu(), torch.tensor(done, dtype=torch.bool))
+
+    def _soft_update(self):
+        tau = self.tau
+        for p, tp in zip(self.q1.parameters(), self.q1_tgt.parameters()):
+            tp.data.mul_(1.0 - tau).add_(tau * p.data)
+        for p, tp in zip(self.q2.parameters(), self.q2_tgt.parameters()):
+            tp.data.mul_(1.0 - tau).add_(tau * p.data)
+
+    def train_step(self) -> Optional[Dict[str, float]]:
+        if len(self.buf) < self.min_mem:
+            return None
+        states, actions, rewards, next_states, dones = self.buf.sample(self.batch_size)
+
+        S  = torch.stack(list(states)).to(self.device)
+        A  = torch.stack(list(actions)).to(self.device)
+        R  = torch.stack(list(rewards)).unsqueeze(1).to(self.device)
+        S2 = torch.stack(list(next_states)).to(self.device)
+        D  = torch.stack(list(dones)).unsqueeze(1).to(self.device)
+
+        alpha = self._alpha.detach()
+
+        # ── Q targets ─────────────────────────────────────────────────────────
+        with torch.no_grad():
+            next_probs = F.softmax(self.actor(S2), dim=-1)
+            next_lp    = torch.log(next_probs + 1e-8)
+            min_q_next = torch.min(self.q1_tgt(S2), self.q2_tgt(S2))
+            next_v     = (next_probs * (min_q_next - alpha * next_lp)).sum(1, keepdim=True)
+            q_targets  = R + self.gamma * ~D * next_v
+
+        # ── Critic update ──────────────────────────────────────────────────────
+        q1_pred = self.q1(S).gather(1, A.unsqueeze(1))
+        q2_pred = self.q2(S).gather(1, A.unsqueeze(1))
+        q_loss  = F.mse_loss(q1_pred, q_targets) + F.mse_loss(q2_pred, q_targets)
+        self.q_opt.zero_grad()
+        q_loss.backward()
+        self.q_opt.step()
+
+        # ── Actor update ───────────────────────────────────────────────────────
+        probs     = F.softmax(self.actor(S), dim=-1)
+        log_probs = torch.log(probs + 1e-8)
+        with torch.no_grad():
+            min_q = torch.min(self.q1(S), self.q2(S))
+        actor_loss = (probs * (self._alpha * log_probs - min_q)).sum(1).mean()
+        self.actor_opt.zero_grad()
+        actor_loss.backward()
+        self.actor_opt.step()
+
+        # ── Temperature update ─────────────────────────────────────────────────
+        with torch.no_grad():
+            entropy = -(probs.detach() * log_probs.detach()).sum(1)
+        alpha_loss = -(self.log_alpha * (entropy - self.target_entropy)).mean()
+        self.alpha_opt.zero_grad()
+        alpha_loss.backward()
+        self.alpha_opt.step()
+
+        self._soft_update()
+        self._steps += 1
+
+        return {
+            'loss':       q_loss.item(),
+            'actor_loss': actor_loss.item(),
+            'alpha':      self._alpha.item(),
+            'entropy':    entropy.mean().item(),
+        }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 8.  Break-Even rule-based agent
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -1439,10 +1827,9 @@ class BreakEvenAgent:
             (Rationale: high anomaly score → clearly anomalous → must be dangerous.)
           • Otherwise block if anomaly score > 0.5, else accept.
 
-    This heuristic is deliberate: Unknown-A (the most dangerous cluster) has
-    the LOWEST anomaly score (overlaps K0), so it is always
-    de-prioritised.  B is bought first, then C or D.  A is reached last or
-    not at all — the A-flows keep draining budget the entire time.
+    Anomaly score is defined as the distance of a cluster's prototype to the
+    nearest known-class prototype.  This heuristic prioritises visually
+    conspicuous unknowns regardless of their actual impact on the budget.
     """
 
     def act(self, state: torch.Tensor, env: SyntheticLIONEnv) -> int:
@@ -1671,11 +2058,17 @@ def smooth(xs: List[float], w: int = 15) -> List[float]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Stable ordering used for reproducible per-agent seed offsets.  Never reorder.
-_ALL_AGENTS = ['DDQN', 'DAI-P', 'DAI-A', 'DAI-SA', 'DAI-F', 'Break-Even']
+_ALL_AGENTS = [
+    'DDQN', 'Dueling-DDQN', 'PPO', 'SAC',
+    'DAI-P', 'DAI-A', 'DAI-SA', 'DAI-F', 'Break-Even',
+]
 
 # ── Choose which agents to benchmark.  Comment out any you want to skip. ──────
 AGENTS = [
     'DDQN',
+    'Dueling-DDQN',
+    'PPO',
+    'SAC',
     'DAI-P',
     'DAI-A',
     'DAI-SA',
@@ -1686,20 +2079,26 @@ AGENTS = [
 
 # Per-agent plot colours and line styles.
 _AGENT_COLOURS = {
-    'DDQN':       '#2196F3',
-    'DAI-P':      '#E91E63',
-    'DAI-A':      '#FF9800',
-    'DAI-SA':     '#9C27B0',
-    'DAI-F':      '#4CAF50',
-    'Break-Even': '#607D8B',
+    'DDQN':         '#2196F3',
+    'Dueling-DDQN': '#00BCD4',
+    'PPO':          '#FF5722',
+    'SAC':          '#8BC34A',
+    'DAI-P':        '#E91E63',
+    'DAI-A':        '#FF9800',
+    'DAI-SA':       '#9C27B0',
+    'DAI-F':        '#4CAF50',
+    'Break-Even':   '#607D8B',
 }
 _AGENT_LS = {
-    'DDQN':       '--',
-    'DAI-P':      '-',
-    'DAI-A':      '-.',
-    'DAI-SA':     ':',
-    'DAI-F':      (0, (5, 2, 1, 2)),
-    'Break-Even': (0, (1, 1)),
+    'DDQN':         '--',
+    'Dueling-DDQN': (0, (4, 2)),
+    'PPO':          (0, (5, 1)),
+    'SAC':          (0, (3, 1, 1, 1, 1, 1)),
+    'DAI-P':        '-',
+    'DAI-A':        '-.',
+    'DAI-SA':       ':',
+    'DAI-F':        (0, (5, 2, 1, 2)),
+    'Break-Even':   (0, (1, 1)),
 }
 
 # Agents that use a transition net (have 'trans_loss' in their train_step return).
@@ -1710,12 +2109,15 @@ _DAI_AGENTS = {'DAI-P', 'DAI-A', 'DAI-SA', 'DAI-F'}
 
 
 def make_agent(name: str, cfg: dict):
-    if name == 'DDQN':       return DDQNAgent(cfg)
-    if name == 'DAI-P':      return DAIPAgent(cfg)
-    if name == 'DAI-A':      return DAIAAgent(cfg)
-    if name == 'DAI-SA':     return DAISAAgent(cfg)
-    if name == 'DAI-F':      return DAIFAgent(cfg)
-    if name == 'Break-Even': return BreakEvenAgent()
+    if name == 'DDQN':         return DDQNAgent(cfg)
+    if name == 'Dueling-DDQN': return DuelingDDQNAgent(cfg)
+    if name == 'PPO':          return PPOAgent(cfg)
+    if name == 'SAC':          return SACAgent(cfg)
+    if name == 'DAI-P':        return DAIPAgent(cfg)
+    if name == 'DAI-A':        return DAIAAgent(cfg)
+    if name == 'DAI-SA':       return DAISAAgent(cfg)
+    if name == 'DAI-F':        return DAIFAgent(cfg)
+    if name == 'Break-Even':   return BreakEvenAgent()
     raise ValueError(f'Unknown agent: {name}. Choose from {_ALL_AGENTS}')
 
 
