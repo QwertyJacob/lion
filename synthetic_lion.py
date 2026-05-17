@@ -1576,26 +1576,33 @@ class PPOAgent:
     """
     Proximal Policy Optimisation (discrete action space).
 
-    Transitions are accumulated over one full episode; at episode end
-    train_step() runs n_epochs of clipped-surrogate + value + entropy losses
-    with GAE advantage estimation, then clears the rollout buffer.
+    Accumulates ppo_rollout_episodes complete episodes before each update.
+    GAE advantages are computed per episode and then concatenated, giving the
+    update a much larger and more diverse batch than a single 50-step episode.
+
+    Entropy bonus is intentionally near-zero: in this low-dimensional env
+    random action sampling already provides sufficient exploration, and a large
+    entropy coefficient keeps the policy artificially diffuse, slowing
+    convergence to the buy-label-A priority.
 
     Key hyper-parameters (taken from CFG with fallbacks):
-      ppo_gae_lambda  0.95   GAE λ
-      ppo_clip_eps    0.20   PPO ε
-      ppo_epochs      4      gradient epochs per episode
-      ppo_vf_coef     0.50   value-loss coefficient
-      ppo_ent_coef    0.01   entropy bonus coefficient
+      ppo_rollout_episodes  10     episodes to collect before each update
+      ppo_gae_lambda        0.95   GAE λ
+      ppo_clip_eps          0.20   PPO ε
+      ppo_epochs            6      gradient epochs per batch
+      ppo_vf_coef           0.50   value-loss coefficient
+      ppo_ent_coef          0.0    entropy bonus (disabled — env is easy to explore)
     """
 
     def __init__(self, cfg: dict):
-        self.gamma      = cfg['gamma']
-        self.device     = torch.device(cfg.get('device', 'cpu'))
-        self.gae_lambda = cfg.get('ppo_gae_lambda', 0.95)
-        self.clip_eps   = cfg.get('ppo_clip_eps',   0.20)
-        self.n_epochs   = cfg.get('ppo_epochs',     4)
-        self.vf_coef    = cfg.get('ppo_vf_coef',    0.50)
-        self.ent_coef   = cfg.get('ppo_ent_coef',   0.01)
+        self.gamma            = cfg['gamma']
+        self.device           = torch.device(cfg.get('device', 'cpu'))
+        self.rollout_episodes = cfg.get('ppo_rollout_episodes', 10)
+        self.gae_lambda       = cfg.get('ppo_gae_lambda',       0.95)
+        self.clip_eps         = cfg.get('ppo_clip_eps',         0.20)
+        self.n_epochs         = cfg.get('ppo_epochs',           6)
+        self.vf_coef          = cfg.get('ppo_vf_coef',          0.50)
+        self.ent_coef         = cfg.get('ppo_ent_coef',         0.0)
 
         self.actor  = TwoStreamNet(out_dim=ACTION_SIZE).to(self.device)
         self.critic = TwoStreamNet(out_dim=1).to(self.device)
@@ -1604,10 +1611,11 @@ class PPOAgent:
             lr=cfg['lr'],
         )
 
-        self.rollout        = _PPORollout()
-        self._last_log_prob = 0.0
-        self._last_value    = 0.0
-        self._episode_done  = False
+        self._current        = _PPORollout()   # episode in progress
+        self._pending:  List[_PPORollout] = [] # completed episodes awaiting update
+        self._last_log_prob  = 0.0
+        self._last_value     = 0.0
+        self._episode_done   = False
 
     def act(self, state: torch.Tensor) -> int:
         s = state.to(self.device)
@@ -1620,36 +1628,52 @@ class PPOAgent:
         return action.item()
 
     def push(self, s, a, r, s2, done):
-        self.rollout.push(
+        self._current.push(
             s.cpu(), a, float(r),
             self._last_log_prob, self._last_value,
             bool(done),
         )
-        self._episode_done = bool(done)
+        if bool(done):
+            self._pending.append(self._current)
+            self._current      = _PPORollout()
+            self._episode_done = True
+
+    def _gae(self, rollout: _PPORollout):
+        """Returns (advantages, returns) tensors for one episode."""
+        T      = len(rollout)
+        values = torch.tensor(rollout.values,  dtype=torch.float32, device=self.device)
+        advs   = torch.zeros(T, device=self.device)
+        last_g = 0.0
+        for t in reversed(range(T)):
+            next_v = 0.0 if rollout.dones[t] else (float(values[t + 1]) if t + 1 < T else 0.0)
+            delta  = rollout.rewards[t] + self.gamma * next_v - float(values[t])
+            last_g = delta + self.gamma * self.gae_lambda * (0.0 if rollout.dones[t] else last_g)
+            advs[t] = last_g
+        return advs, advs + values
 
     def train_step(self) -> Optional[Dict[str, float]]:
-        if not self._episode_done or len(self.rollout) == 0:
+        if not self._episode_done:
             return None
         self._episode_done = False
 
-        T       = len(self.rollout)
-        states  = torch.stack(self.rollout.states).to(self.device)
-        actions = torch.tensor(self.rollout.actions,   dtype=torch.long,    device=self.device)
-        old_lps = torch.tensor(self.rollout.log_probs, dtype=torch.float32, device=self.device)
-        values  = torch.tensor(self.rollout.values,    dtype=torch.float32, device=self.device)
-        rewards = self.rollout.rewards
-        dones   = self.rollout.dones
+        if len(self._pending) < self.rollout_episodes:
+            return None
 
-        # GAE advantage estimation
-        advs     = torch.zeros(T, device=self.device)
-        last_gae = 0.0
-        for t in reversed(range(T)):
-            next_v   = 0.0 if dones[t] else (float(values[t + 1]) if t + 1 < T else 0.0)
-            delta    = rewards[t] + self.gamma * next_v - float(values[t])
-            last_gae = delta + self.gamma * self.gae_lambda * (0.0 if dones[t] else last_gae)
-            advs[t]  = last_gae
+        # Build one big batch from all pending episodes
+        all_states, all_actions, all_old_lps, all_returns, all_advs = [], [], [], [], []
+        for ep in self._pending:
+            advs, returns = self._gae(ep)
+            all_states.append(torch.stack(ep.states))
+            all_actions.append(torch.tensor(ep.actions,   dtype=torch.long,    device=self.device))
+            all_old_lps.append(torch.tensor(ep.log_probs, dtype=torch.float32, device=self.device))
+            all_returns.append(returns.detach())
+            all_advs.append(advs)
 
-        returns = (advs + values).detach()
+        states  = torch.cat(all_states).to(self.device)
+        actions = torch.cat(all_actions)
+        old_lps = torch.cat(all_old_lps)
+        returns = torch.cat(all_returns)
+        advs    = torch.cat(all_advs)
         advs    = ((advs - advs.mean()) / (advs.std() + 1e-8)).detach()
 
         all_losses = []
@@ -1675,7 +1699,7 @@ class PPOAgent:
             self.opt.step()
             all_losses.append(loss.item())
 
-        self.rollout.clear()
+        self._pending.clear()
         return {'loss': float(np.mean(all_losses))}
 
 
