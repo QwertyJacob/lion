@@ -146,7 +146,7 @@ CFG = dict(
     batch_size   = 64,
     memory_size  = 6000,
     target_update = 20,       # steps between target-net hard updates
-    temperature  = 100,       # Boltzmann temperature (DAI variants)
+    precision    = 100,       # Boltzmann precision (DAI variants; precision = inverse temperature)
     min_memory_to_train = 128,
     # DDQN ε-greedy exploration
     epsilon_start = 0.25,     # low exploration for good comparison
@@ -867,7 +867,7 @@ class DAIPAgent:
     def __init__(self, cfg: dict):
         self.gamma       = cfg['gamma']
         self.batch_size  = cfg['batch_size']
-        self.temperature = cfg['temperature']
+        self.precision = cfg['precision']
         self.target_upd  = cfg['target_update']
         self.min_mem     = cfg['min_memory_to_train']
         self.eps_w       = cfg['epistemic_weight']
@@ -889,7 +889,7 @@ class DAIPAgent:
     def act(self, state: torch.Tensor) -> int:
         with torch.no_grad():
             nefe  = self.efe_net(state.to(self.device)).squeeze()
-            probs = F.softmax(self.temperature * nefe, dim=-1)
+            probs = F.softmax(self.precision * nefe, dim=-1)
         return torch.multinomial(probs, 1).item()
 
     def compute_epist(self, state: torch.Tensor, action: int,
@@ -988,7 +988,7 @@ class DAIAAgent:
     def __init__(self, cfg: dict):
         self.gamma       = cfg['gamma']
         self.batch_size  = cfg['batch_size']
-        self.temperature = cfg['temperature']
+        self.precision = cfg['precision']
         self.target_upd  = cfg['target_update']
         self.min_mem     = cfg['min_memory_to_train']
         self.eps_w       = cfg['epistemic_weight']
@@ -1013,7 +1013,7 @@ class DAIAAgent:
     def act(self, state: torch.Tensor) -> int:
         with torch.no_grad():
             nefe  = self.efe_net(state.to(self.device)).squeeze()
-            probs = F.softmax(self.temperature * nefe, dim=-1)
+            probs = F.softmax(self.precision * nefe, dim=-1)
         return torch.multinomial(probs, 1).item()
 
     def compute_epist(self, state: torch.Tensor, action: int,
@@ -1101,7 +1101,7 @@ class DAIAAgent:
 
         # ── train policy net (track Boltzmann policy from critic) ─────────────
         with torch.no_grad():
-            target_policy = F.softmax(self.temperature * self.efe_net(S).detach(), dim=1)
+            target_policy = F.softmax(self.precision * self.efe_net(S).detach(), dim=1)
         policy_loss = F.mse_loss(policy_prior, target_policy)
         self.policy_opt.zero_grad()
         policy_loss.backward()
@@ -1145,7 +1145,7 @@ class DAISAAgent:
     def __init__(self, cfg: dict):
         self.gamma       = cfg['gamma']
         self.batch_size  = cfg['batch_size']
-        self.temperature = cfg['temperature']
+        self.precision = cfg['precision']
         self.target_upd  = cfg['target_update']
         self.min_mem     = cfg['min_memory_to_train']
         self.eps_w       = cfg['epistemic_weight']
@@ -1166,7 +1166,7 @@ class DAISAAgent:
     def act(self, state: torch.Tensor) -> int:
         with torch.no_grad():
             nefe  = self.efe_net(state.to(self.device)).squeeze()
-            probs = F.softmax(self.temperature * nefe, dim=-1)
+            probs = F.softmax(self.precision * nefe, dim=-1)
         return torch.multinomial(probs, 1).item()
 
     def compute_epist(self, state: torch.Tensor, action: int,
@@ -1174,7 +1174,7 @@ class DAISAAgent:
         """Single-step surrogate epistemic gain: ‖Q_φ(a|s) − P(a|s)‖²."""
         with torch.no_grad():
             s             = state.unsqueeze(0).to(self.device)
-            target_policy = F.softmax(self.temperature * self.efe_net(s), dim=1)
+            target_policy = F.softmax(self.precision * self.efe_net(s), dim=1)
             policy_prior  = self.policy_net(s)
             return ((policy_prior - target_policy) ** 2).sum().item()
 
@@ -1196,7 +1196,7 @@ class DAISAAgent:
 
         # Policy prior; target policy uses the critic at this point in time.
         with torch.no_grad():
-            target_policy = F.softmax(self.temperature * self.efe_net(S), dim=1)
+            target_policy = F.softmax(self.precision * self.efe_net(S), dim=1)
         policy_prior = self.policy_net(S)  # (B, A) — with grad for policy loss
 
         # ── surrogate active epistemic gain (frozen divergence) ───────────────
@@ -1225,7 +1225,7 @@ class DAISAAgent:
         # ── train policy net (minimise divergence from normative policy) ───────
         with torch.no_grad():
             target_policy_upd = F.softmax(
-                self.temperature * self.efe_net(S).detach(), dim=1)
+                self.precision * self.efe_net(S).detach(), dim=1)
         policy_loss = F.mse_loss(policy_prior, target_policy_upd)
         self.policy_opt.zero_grad()
         policy_loss.backward()
@@ -1266,7 +1266,7 @@ class DAIFAgent:
     def __init__(self, cfg: dict):
         self.gamma       = cfg['gamma']
         self.batch_size  = cfg['batch_size']
-        self.temperature = cfg['temperature']
+        self.precision = cfg['precision']
         self.target_upd  = cfg['target_update']
         self.min_mem     = cfg['min_memory_to_train']
         self.eps_w       = cfg['epistemic_weight']
@@ -1291,7 +1291,7 @@ class DAIFAgent:
     def act(self, state: torch.Tensor) -> int:
         with torch.no_grad():
             nefe  = self.efe_net(state.to(self.device)).squeeze()
-            probs = F.softmax(self.temperature * nefe, dim=-1)
+            probs = F.softmax(self.precision * nefe, dim=-1)
         return torch.multinomial(probs, 1).item()
 
     def compute_epist(self, state: torch.Tensor, action: int,
@@ -1387,7 +1387,7 @@ class DAIFAgent:
 
         # ── train policy net ──────────────────────────────────────────────────
         with torch.no_grad():
-            target_policy = F.softmax(self.temperature * self.efe_net(S).detach(), dim=1)
+            target_policy = F.softmax(self.precision * self.efe_net(S).detach(), dim=1)
         policy_loss = F.mse_loss(policy_prior, target_policy)
         self.policy_opt.zero_grad()
         policy_loss.backward()
@@ -1590,6 +1590,7 @@ class PPOAgent:
             lr=cfg['lr'],
         )
 
+        self.precision      = cfg.get('precision', 100)
         self.rollout        = _PPORollout()
         self._last_log_prob = 0.0
         self._last_value    = 0.0
@@ -1598,7 +1599,7 @@ class PPOAgent:
     def act(self, state: torch.Tensor) -> int:
         s = state.to(self.device)
         with torch.no_grad():
-            probs  = F.softmax(self.actor(s).squeeze(), dim=-1)
+            probs  = F.softmax(self.precision * self.actor(s).squeeze(), dim=-1)
             dist   = torch.distributions.Categorical(probs)
             action = dist.sample()
             self._last_log_prob = dist.log_prob(action).item()
@@ -1640,7 +1641,7 @@ class PPOAgent:
 
         all_losses = []
         for _ in range(self.n_epochs):
-            probs    = F.softmax(self.actor(states), dim=-1)
+            probs    = F.softmax(self.precision * self.actor(states), dim=-1)
             dist     = torch.distributions.Categorical(probs)
             new_lps  = dist.log_prob(actions)
             entropy  = dist.entropy().mean()
@@ -1803,11 +1804,21 @@ class SACAgent:
         self._soft_update()
         self._steps += 1
 
+        # ── Per-action entropy bonus (for comparison with DAI epistemic gains) ─
+        with torch.no_grad():
+            entropy_bonus = self._alpha.detach() * entropy  # (B,)
+        epist_per_action: Dict[int, float] = {}
+        for a_idx in range(ACTION_SIZE):
+            mask = (A == a_idx)
+            if mask.any():
+                epist_per_action[a_idx] = entropy_bonus[mask].mean().item()
+
         return {
-            'loss':       q_loss.item(),
-            'actor_loss': actor_loss.item(),
-            'alpha':      self._alpha.item(),
-            'entropy':    entropy.mean().item(),
+            'loss':             q_loss.item(),
+            'actor_loss':       actor_loss.item(),
+            'alpha':            self._alpha.item(),
+            'entropy':          entropy.mean().item(),
+            'epist_per_action': epist_per_action,
         }
 
 
@@ -2107,6 +2118,10 @@ _HAS_TRANS = {'DAI-P', 'DAI-A', 'DAI-F'}
 # All DAI-based agents (emit 'epist_per_action' from train_step).
 _DAI_AGENTS = {'DAI-P', 'DAI-A', 'DAI-SA', 'DAI-F'}
 
+# Agents that emit 'epist_per_action' and should have epistemic_gains logged.
+# SAC reports α·H(π) per action (entropy bonus) in the same metrics for comparison.
+_EPIST_AGENTS = _DAI_AGENTS | {'SAC'}
+
 
 def make_agent(name: str, cfg: dict):
     if name == 'DDQN':         return DDQNAgent(cfg)
@@ -2187,7 +2202,7 @@ def _run_one(task: dict) -> dict:
                     f'loss={stats.mean_loss:.4f}')
             if agent_name in _HAS_TRANS:
                 line += f'  tloss={stats.mean_trans_loss:.4f}'
-            if agent_name in _DAI_AGENTS:
+            if agent_name in _EPIST_AGENTS:
                 epist_vals = list(stats.epist_per_action.values())
                 mean_epist = float(np.mean(epist_vals)) if epist_vals else 0.0
                 line += f'  epist_mean={mean_epist:.4f}'
@@ -2205,13 +2220,14 @@ def _run_one(task: dict) -> dict:
         _cluster_names = {0: 'A', 1: 'B', 2: 'C', 3: 'D'}
         for uid, cname in _cluster_names.items():
             wm[f'unk_confs/{cname}'] = stats.unk_conf_mean.get(uid, 0.0)
-        if agent_name in _DAI_AGENTS:
+        if agent_name in _EPIST_AGENTS:
             for a_idx, a_name in {0: 'block', 1: 'accept', 2: 'buy_label'}.items():
                 wm[f'epistemic_gains/{a_name}'] = stats.epist_per_action.get(a_idx, 0.0)
             epist_vals = list(stats.epist_per_action.values())
             wm['epistemic_gains/mean'] = float(np.mean(epist_vals)) if epist_vals else 0.0
-            for uid, cname in _cluster_names.items():
-                wm[f'epistemic_gains/buy_{cname}'] = stats.epist_buy_per_cluster.get(uid, 0.0)
+            if agent_name in _DAI_AGENTS:
+                for uid, cname in _cluster_names.items():
+                    wm[f'epistemic_gains/buy_{cname}'] = stats.epist_buy_per_cluster.get(uid, 0.0)
 
         if at_log and wlog.active:
             wm.update(_space_scatter_figs(stats, seed))
