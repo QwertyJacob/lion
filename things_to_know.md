@@ -1,6 +1,6 @@
 ## 1. What is the `label_A` plot?
 
-Each episode, `labels_bought[0]` is either `True` (label A was purchased at some point during the episode) or `False`. That boolean is logged as 0/1. The plot shows the **rolling mean** of that binary across episodes — so the Y-axis is simply "fraction of recent episodes in which label A was purchased". It resets every episode (the env calls `labels_bought = [False]*4` on reset), so buying A once per episode is the maximum. The curve goes up as the agent learns to prioritise it.
+Each episode, `labels_bought[0]` is either `True` (label A was purchased at some point during the episode) or `False`. That boolean is logged as 0/1. The plot shows the **rolling mean** of that binary across episodes — so the Y-axis is simply "fraction of recent episodes in which label A was purchased". It resets every episode (the env calls `labels_bought = [False]*4` on reset). The curve reflects how consistently each agent chooses to acquire that particular label.
 
 ---
 
@@ -8,20 +8,20 @@ Each episode, `labels_bought[0]` is either `True` (label A was purchased at some
 
 It can't — and that's the precise answer. **DAI-P does not have foreknowledge.** The epistemic gain is computed from the transition network's *current* prediction error on transitions that have already been stored in the replay buffer. The sequence across episodes is:
 
-1. **Early exploration** — the agent tries buy-label-A by chance (or Boltzmann noise). The transition network is poorly trained and makes a large prediction error on the resulting proprioceptive state flip. This error gets stored in the replay buffer tied to that action.
-2. **EFE target update** — the large MSE augments the EFE target for buy-label-A, pushing its intrinsic value up.
-3. **Next episodes** — buy-label-A now has a higher EFE value → Boltzmann sampling makes it more likely → the agent does it more often → more replay data confirms the pattern.
+1. **Early exploration** — the agent tries a label purchase by chance (or Boltzmann sampling). The transition network is poorly trained and makes a large prediction error on the resulting proprioceptive state change. This error is stored in the replay buffer tied to that action.
+2. **EFE target update** — the large MSE augments the EFE target for that purchase, pushing its intrinsic value up.
+3. **Next episodes** — that label purchase now has a higher EFE value → Boltzmann sampling makes it more likely → the agent does it more often → more replay data confirms the pattern.
 
-So yes, you're right: this is **learned across episodes from data**, not innate foreknowledge. And yes, it is **completely tied to the specific data distributions** — the reason DAI-P picks up label A first is precisely because A causes the largest state change *in this environment*. Change the geometry of the clusters and the epistemic priority ranking changes with it. That's actually a desirable property for a paper argument: DAI-P discovers the most informative label automatically, without being told which one it is.
+So yes: this is **learned across episodes from data**, not innate foreknowledge. The reason DAI-P prioritises certain labels is precisely because they cause the largest proprioceptive state changes *in this environment*. Change the geometry of the clusters and the epistemic priority ranking changes with it. That's a desirable property for a paper argument: DAI-P discovers the most informative label automatically, without being told which one it is.
 
 ---
 
 ## 3. Does this confirm the DDQN / DAI-P timing difference?
 
-Yes. Both agents need to *experience* buying A before they can learn from it. The difference is the **temporal credit assignment**:
+Yes. Both agents need to *experience* a label purchase before they can learn from it. The difference is **temporal credit assignment**:
 
-- **DDQN** must wait for the downstream reward signal to propagate back through many subsequent steps of blocked malicious flows before the Q-value for buy-label-A rises enough to be selected consistently.
-- **DAI-P** gets an *immediate* intrinsic signal — the very transition in which A is bought produces the large MSE — so the EFE for that action is updated after just one experience. Faster signal, faster learning.
+- **DDQN** must wait for the downstream reward signal to propagate back through many subsequent steps before the Q-value for that purchase rises enough to be selected consistently.
+- **DAI-P** gets an *immediate* intrinsic signal — the very transition in which the label is bought produces the large MSE — so the EFE for that action is updated after just one experience. Faster signal, faster learning.
 
 ---
 
@@ -32,10 +32,10 @@ Yes. Both agents need to *experience* buying A before they can learn from it. Th
 | **Episode cumulative reward** | episode | sum of all rewards within the episode | Overall "how well did the agent play the budget game" |
 | **Win rate** | episode | rolling fraction of episodes that ended with budget ≥ 40 | The main success metric |
 | **Labels purchased / episode** | episode | mean number of CTI labels bought per episode | Are agents buying strategically (few, targeted) or impulsively? |
-| **Label-A purchased (frac.)** | episode | rolling fraction of episodes in which label A was bought | Did the agent learn to prioritise the critical label? |
+| **Label-A purchased (frac.)** | episode | rolling fraction of episodes in which label A was bought | How consistently does the agent acquire this label? |
 | **Final budget** | episode | budget value at episode end (win=40+, lose=0) | Finer-grained than win/lose — shows how comfortable the wins are |
 
-For **Label-A**: within a single episode, label A is either bought or not — it's binary. The Y-axis is the smoothed average of that binary over a sliding window of episodes, so it's a fraction in [0, 1]. You cannot buy label A "more than once" per episode because after the first purchase `labels_bought[0]` stays `True` for the rest of the episode and subsequent buy attempts get the invalid-action penalty.
+For **Label-A**: within a single episode, label A is either bought or not — it's binary. The Y-axis is the smoothed average of that binary over a sliding window of episodes. You cannot buy label A "more than once" per episode because after the first purchase `labels_bought[0]` stays `True` for the rest of the episode and subsequent buy attempts get the invalid-action penalty.
 
 ---
 
@@ -52,10 +52,10 @@ A flow is declared *unknown/anomalous* if it is farther than `anomaly_threshold`
 
 The clustering of unknowns then happens separately via the EMA unknown-cluster prototypes — but only for flows already deemed anomalous.
 
-**The fundamental limitation** — and the deliberate trap — is that **Unknown A lives below that threshold** (it's close to K0). So it never even reaches the unknown-clustering step. It gets classified as K0 (benign) with high confidence, accepted, and the agent loses 7 per flow. There's no way for the inference module to detect A as unknown without either (a) buying the label, or (b) lowering the threshold so much that it starts flagging legitimate K0 flows as anomalous too. This is a principled approximation of the real-world problem: some attack traffic genuinely looks identical to normal traffic in your feature space.
+Unknown A lives below that threshold (it's close to K0 in feature space), so it never reaches the unknown-clustering step. It gets classified as K0 (benign) with high confidence until its label is purchased. This is a principled approximation of the real-world problem: some attack traffic genuinely looks identical to normal traffic in your feature space.
 
 ---
 
 ## 6. Per-cluster proprioceptive state
 
-PROPRIO_DIM 6→9, STATE_DIM 11→14. The proprioceptive state is waht the transitionnet predicts.  proprio[0:4] = [conf_A, conf_B, conf_C, conf_D] drawn from the existing unk_conf EMA buffers. The transition network can learn the exact pattern: buy-label-A → conf_A → 0, others unchanged. That's the sharpest possible signal for the epistemic gain. unk_conf[uid] is also zeroed in step() the moment a label is bought.
+PROPRIO_DIM 6→9, STATE_DIM 11→14. The proprioceptive state is what the TransitionNet predicts. `proprio[0:4] = [conf_A, conf_B, conf_C, conf_D]` drawn from the existing `unk_conf` EMA buffers. The transition network can learn the exact pattern: buying a label zeroes that cluster's confidence slot while leaving the others unchanged — a clean, cluster-specific signal. `unk_conf[uid]` is also zeroed in `step()` the moment a label is bought.

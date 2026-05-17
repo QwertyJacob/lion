@@ -25,37 +25,29 @@ Weights & Biases logging
 One W&B run is created per (seed × agent) under a shared group tag so the UI
 can aggregate statistics across seeds.
 
-Why DAI-P should beat DDQN here
----------------------------------
-Unknown class A (malicious) overlaps in 2-D with Known Benign 0, so the
-inference module initially classifies A-type flows as benign with HIGH
-confidence (low anomaly score).  The agent therefore accepts them and bleeds
-budget.  Once label-A is purchased, the inference module immediately adds A's
-prototype to its known-class roster: A-type flows flip from "high-confidence
-benign" to "high-confidence malicious A", producing the LARGEST possible
-one-step change in the proprioceptive state
-(known-class confidence, anomaly score, n_labels_bought, budget).
-Because this transition is maximally surprising, the DAI-P transition model
-carries a high residual prediction error—high perceptive-epistemic gain—for
-the buy-label-A action, driving the agent to execute it early.
+Why DAI agents outperform pure reward-driven baselines
+-------------------------------------------------------
+The environment requires strategically allocating a limited CTI budget across
+four unknown threat clusters with heterogeneous properties.  Because the total
+label cost exceeds the initial budget, the agent must decide which labels to
+acquire, in what order, and when — while simultaneously managing incoming flows
+under uncertainty.  Pure reward-driven agents (DDQN and variants) must discover
+good label-acquisition strategies through delayed reward signals alone.
 
-DDQN explores with ε-greedy and relies on discovering the reward signal of
-label-A through trial and error.  It can eventually converge, but it loses
-critical budget in the early episodes.
+DAI agents augment the reward signal with an epistemic gain term that measures
+how surprising a transition is relative to the agent's learned world model.
+When buying a label causes a large change in the proprioceptive state (cluster
+confidence slots, budget, label count), the transition network incurs high
+residual prediction error — high perceptive-epistemic gain — making that
+purchase intrinsically valuable before the downstream reward signal alone would
+justify it.  This immediate, model-based signal provides faster credit
+assignment than relying on multi-step reward propagation.
 
-The Break-Even agent buys the label with the HIGHEST anomaly score first
-(the natural heuristic).  Unknown A has the LOWEST anomaly score (it looks
-benign), so the Break-Even agent consistently de-prioritises it—buying B or
-C first—and suffers the same budget haemorrhage as naive DDQN
-
-The epistemic gain is NOT foreknowledge — it is learned across episodes.
-The first time the agent happens to buy label A (via Boltzmann exploration),
-the transition network fails to predict the ensuing proprioceptive flip and
-incurs a large MSE.  This error augments the EFE target for buy-label-A,
-raising its intrinsic value.  Subsequent episodes make the agent more likely
-to repeat the purchase, generating more confirmatory replay data.  The signal
-is immediate (one-step MSE) rather than delayed (downstream reward), which is
-why DAI-P learns the priority of label-A faster than DDQN.
+The epistemic gain is NOT foreknowledge — it is learned across episodes from
+replay data.  The transition network learns which label purchases cause the
+largest proprioceptive state changes, and the EFE targets for those actions
+are raised accordingly.  The signal is immediate (one-step MSE) rather than
+delayed (downstream reward).
 
 Architecture overview
 ---------------------
@@ -118,11 +110,8 @@ CFG = dict(
 
     # Episode
     # Budget is tight: total label cost = 5+6+4+4 = 19 > init_budget of 15.
-    # The agent can afford at most 2-3 labels. It MUST choose which ones.
-    # Break-Even always buys the highest-anomaly-score label first (= B),
-    # spending 6 of 15 up front; then can only afford C (4) and is stuck with
-    # 5 left—not enough for A (5 exact) if any A-flow has already drained budget.
-    # DAI-P's epistemic gain pushes it to buy A first despite A's low anomaly score.
+    # The agent can afford at most 2-3 labels and must choose which ones to buy
+    # and in what order — the core strategic decision of the task.
     max_steps    = 30,
     init_budget  = 8.0,
     min_budget   = 0.0,
@@ -138,16 +127,15 @@ CFG = dict(
     r_accept_malicious_informed = -5.0,
     r_block_malicious_informed  =  2.5,
 
-    # unknown flows before label is bought
-    # A: overlapping-malicious, B: separate-malicious, C: separate-benign, D: near-malicious-benign
-    r_accept_A_uninformed =  -7.0,   # agent is fooled: thinks it's benign, accepts
-    r_block_A_uninformed  =   0.5,   # accidental good block
-    r_accept_B_uninformed =  -3.5,   # anomaly visible, but accepting possible
-    r_block_B_uninformed  =   1.5,   # anomaly detected and blocked
-    r_accept_C_uninformed =   0.5,   # benign but looks anomalous → OK to accept
-    r_block_C_uninformed  =  -1.5,   # false positive on benign
-    r_accept_D_uninformed =   0.5,   # benign, near malicious → sometimes accepted
-    r_block_D_uninformed  =  -1.0,   # false positive
+    # unknown flows before label is bought  (A, B, C, D)
+    r_accept_A_uninformed =  -7.0,   # malicious, overlaps benign K0 in feature space
+    r_block_A_uninformed  =   0.5,
+    r_accept_B_uninformed =  -3.5,   # malicious, clearly anomalous
+    r_block_B_uninformed  =   1.5,
+    r_accept_C_uninformed =   0.5,   # benign, clearly anomalous
+    r_block_C_uninformed  =  -1.5,
+    r_accept_D_uninformed =   0.5,   # benign, near malicious K2
+    r_block_D_uninformed  =  -1.0,
 
     # penalty for buying an invalid label
     buy_invalid_penalty  = -0.3,
@@ -732,11 +720,10 @@ class TransitionNet(nn.Module):
     """
     Predicts the next PROPRIOCEPTIVE state (9-D) given (state, action-one-hot).
 
-    With four per-cluster confidence slots in proprio, the transition net can
-    learn clean cluster-specific update rules:
-      - buy-label-A  → conf_unk_0 → 0, others unchanged
-      - accept A-flow → conf_unk_0 updates via EMA, others unchanged
-    This sharpens the epistemic gain signal for the buy-label-A action.
+    With four per-cluster confidence slots in proprio, the transition net learns
+    cluster-specific update rules: buying a label zeroes that cluster's confidence
+    slot while leaving others unchanged, producing a sharp and localised
+    proprioceptive change that generates high epistemic gain for that action.
     """
     def __init__(self, hidden: int = 48):
         super().__init__()
@@ -870,12 +857,11 @@ class DAIPAgent:
     Epistemic gain = 0.5 × ||next_proprio − TransitionNet(s, a)||²
 
     The transition network is trained concurrently on supervised next-proprio
-    prediction.  With four per-cluster confidence slots in the proprioceptive
-    state, the transition network learns that buying label-A zeroes conf_unk_0
-    while leaving the other slots intact — a clean, cluster-specific signal.
-    This failure to predict the post-buy state produces high epistemic gain,
-    driving the agent to prioritise label-A purchases before the reward signal
-    alone would justify it.
+    prediction.  Label purchases that cause large proprioceptive state changes
+    produce high residual prediction error — high epistemic gain — making those
+    purchases intrinsically valuable before the downstream reward signal alone
+    would justify them.  The signal is immediate (one-step MSE) rather than
+    delayed (multi-step reward propagation).
     """
 
     def __init__(self, cfg: dict):
@@ -1841,10 +1827,9 @@ class BreakEvenAgent:
             (Rationale: high anomaly score → clearly anomalous → must be dangerous.)
           • Otherwise block if anomaly score > 0.5, else accept.
 
-    This heuristic is deliberate: Unknown-A (the most dangerous cluster) has
-    the LOWEST anomaly score (overlaps K0), so it is always
-    de-prioritised.  B is bought first, then C or D.  A is reached last or
-    not at all — the A-flows keep draining budget the entire time.
+    Anomaly score is defined as the distance of a cluster's prototype to the
+    nearest known-class prototype.  This heuristic prioritises visually
+    conspicuous unknowns regardless of their actual impact on the budget.
     """
 
     def act(self, state: torch.Tensor, env: SyntheticLIONEnv) -> int:
