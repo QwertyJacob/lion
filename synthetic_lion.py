@@ -1894,6 +1894,12 @@ class EpisodeStats:
     epist_buy_per_cluster: Dict[int, float] = field(default_factory=lambda: {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0})
     # mean unk_conf per cluster, averaged over steps before that cluster's label is bought
     unk_conf_mean: Dict[int, float] = field(default_factory=lambda: {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0})
+    # reward decomposition (mean per step in each regime)
+    classification_reward: float = 0.0   # known/labelled flows, actions 0/1
+    clustering_reward:     float = 0.0   # unknown unlabelled flows, actions 0/1
+    cti_cost:              float = 0.0   # total label purchase cost (absolute value)
+    # mean known-class softmax confidence (conf_k) over all steps
+    inference_confidence:  float = 0.0
     # per-step data for space visualisation (populated only when collect_vis=True)
     step_rewards:  List[float] = field(default_factory=list)
     input_points:  List        = field(default_factory=list)  # (N, 2) raw inputs
@@ -1911,6 +1917,11 @@ def run_episode(agent, env: SyntheticLIONEnv, train: bool = True,
     epist_buy_by_uid: Dict[int, List[float]] = {0: [], 1: [], 2: [], 3: []}
     # unk_conf samples per cluster, collected only while label not yet bought
     unk_conf_samples: Dict[int, List[float]] = {0: [], 1: [], 2: [], 3: []}
+    # reward decomposition accumulators
+    classif_rewards: List[float] = []
+    cluster_rewards: List[float] = []
+    conf_k_samples:  List[float] = []
+    cti_cost_total:  float       = 0.0
 
     while True:
         # Snapshot unk_conf for each cluster that hasn't been bought yet this step
@@ -1929,8 +1940,26 @@ def run_episode(agent, env: SyntheticLIONEnv, train: bool = True,
                  else agent.act(state)
 
         prev_labels = list(env.labels_bought)
+        # Snapshot flow metadata before step() loads the next flow
+        f_snap    = env._flow
+        uid_snap  = f_snap['unknown_id']
+        conf_k_samples.append(f_snap['conf_k'])
+
         next_state, reward, done, info = env.step(action)
         stats.total_reward += reward
+
+        # Decompose reward by regime
+        if action == 2:
+            # buy-label: record cost (price debited, not the tiny -price*0.05 signal)
+            if uid_snap is not None and not prev_labels[uid_snap]:
+                if env.budget >= 0:   # purchase succeeded
+                    cti_cost_total += env.cfg['label_prices'][uid_snap]
+        elif action in (0, 1):
+            is_informed = f_snap['is_known'] or (uid_snap is not None and prev_labels[uid_snap])
+            if is_informed:
+                classif_rewards.append(reward)
+            elif uid_snap is not None:
+                cluster_rewards.append(reward)
 
         if collect_vis:
             stats.step_rewards.append(reward)
@@ -1975,6 +2004,10 @@ def run_episode(agent, env: SyntheticLIONEnv, train: bool = True,
                 uid: float(np.mean(vals)) if vals else 0.0
                 for uid, vals in unk_conf_samples.items()
             }
+            stats.classification_reward = float(np.mean(classif_rewards)) if classif_rewards else 0.0
+            stats.clustering_reward     = float(np.mean(cluster_rewards))  if cluster_rewards  else 0.0
+            stats.cti_cost              = cti_cost_total
+            stats.inference_confidence  = float(np.mean(conf_k_samples))   if conf_k_samples   else 0.0
             break
 
     return stats
@@ -2212,9 +2245,14 @@ def _run_one(task: dict) -> dict:
 
         mean_reward = stats.total_reward / max(stats.n_steps, 1)
         wm = dict(reward=mean_reward, win=int(stats.win),
+                  reward_sum=stats.total_reward,
                   n_labels=stats.n_labels, label_A=int(stats.labels[0]),
                   budget_final=stats.budget_final, n_steps=stats.n_steps,
-                  loss=stats.mean_loss)
+                  loss=stats.mean_loss,
+                  classification_reward=stats.classification_reward,
+                  clustering_reward=stats.clustering_reward,
+                  cti_cost=stats.cti_cost,
+                  inference_confidence=stats.inference_confidence)
         if agent_name in _HAS_TRANS:
             wm['trans_loss'] = stats.mean_trans_loss
         _cluster_names = {0: 'A', 1: 'B', 2: 'C', 3: 'D'}
