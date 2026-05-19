@@ -2221,9 +2221,8 @@ def _run_one(task: dict) -> dict:
     wlog = _WandbLogger(agent_name=agent_name, seed=seed, cfg=cfg, **wandb_kw)
 
     ep_rewards, ep_wins, ep_labels, ep_labelA, ep_budget = [], [], [], [], []
-    # label purchase sequences collected from episode n_episodes//2 onwards
+    # label purchase sequences collected from won episodes only
     late_label_seqs: List[tuple] = []
-    _seq_start = n_episodes // 2
     _cluster_names = {0: 'A', 1: 'B', 2: 'C', 3: 'D'}
 
     for ep in range(n_episodes):
@@ -2235,8 +2234,8 @@ def _run_one(task: dict) -> dict:
         ep_labelA.append(int(stats.labels[0]))
         ep_budget.append(stats.budget_final)
 
-        # Collect label-buy sequence (ordered by step) from the second half of training
-        if ep >= _seq_start:
+        # Collect label-buy sequence only from won episodes
+        if stats.win:
             seq = tuple(
                 _cluster_names[uid]
                 for _, uid in sorted(stats.label_buy_steps, key=lambda x: x[0])
@@ -2317,7 +2316,7 @@ def _run_one(task: dict) -> dict:
             f'{phase}/label_A_rate': float(np.mean(ep_labelA[sl])),
         })
 
-    # Most common label-purchase sequence in the second half of training
+    # Most common label-purchase sequence across all won episodes
     if late_label_seqs:
         seq_counter = collections.Counter(late_label_seqs)
         top_seq, top_count = seq_counter.most_common(1)[0]
@@ -2325,7 +2324,7 @@ def _run_one(task: dict) -> dict:
         wlog.summary({
             'label_seq/most_common':       seq_str,
             'label_seq/most_common_count': top_count,
-            'label_seq/total_episodes':    len(late_label_seqs),
+            'label_seq/won_episodes':      len(late_label_seqs),
         })
 
     wlog.finish()
