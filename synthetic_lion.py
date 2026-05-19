@@ -65,6 +65,7 @@ Architecture overview
 from __future__ import annotations
 
 import argparse
+import collections
 import concurrent.futures
 import itertools
 import multiprocessing
@@ -1885,6 +1886,9 @@ class EpisodeStats:
     budget_final:    float = 0.0
     # label buy events: list of (step_idx, unknown_uid) tuples
     label_buy_steps: List[Tuple[int, int]] = field(default_factory=list)
+    # profiling: mean wall-clock time per call (milliseconds)
+    mean_act_time_ms:   float = 0.0   # agent.act() — inference step
+    mean_train_time_ms: float = 0.0   # agent.train_step() — gradient step
     # training losses (averaged over all gradient steps in the episode)
     mean_loss:       float = 0.0
     mean_trans_loss: float = 0.0  # agents with TransitionNet only
@@ -1913,6 +1917,8 @@ def run_episode(agent, env: SyntheticLIONEnv, train: bool = True,
     state = env.reset()
     stats = EpisodeStats()
     losses, trans_losses = [], []
+    act_times:   List[float] = []   # inference step wall-clock (ms)
+    train_times: List[float] = []   # training step wall-clock (ms)
     epist_by_action:  Dict[int, List[float]] = {0: [], 1: [], 2: []}
     epist_buy_by_uid: Dict[int, List[float]] = {0: [], 1: [], 2: [], 3: []}
     # unk_conf samples per cluster, collected only while label not yet bought
@@ -1936,8 +1942,10 @@ def run_episode(agent, env: SyntheticLIONEnv, train: bool = True,
             stats.gt_labels.append(_flow_gt_label(f, env.dg))
             stats.pred_labels.append(_flow_pred_label(f))
 
+        _t0 = time.perf_counter()
         action = agent.act(state, env) if isinstance(agent, BreakEvenAgent) \
                  else agent.act(state)
+        act_times.append((time.perf_counter() - _t0) * 1e3)
 
         prev_labels = list(env.labels_bought)
         # Snapshot flow metadata before step() loads the next flow
@@ -1975,7 +1983,9 @@ def run_episode(agent, env: SyntheticLIONEnv, train: bool = True,
 
         if train:
             agent.push(state, action, reward, next_state, done)
+            _t1 = time.perf_counter()
             loss_info = agent.train_step()
+            train_times.append((time.perf_counter() - _t1) * 1e3)
             if loss_info:
                 if 'loss'            in loss_info: losses.append(loss_info['loss'])
                 if 'trans_loss'      in loss_info: trans_losses.append(loss_info['trans_loss'])
@@ -1990,6 +2000,8 @@ def run_episode(agent, env: SyntheticLIONEnv, train: bool = True,
             stats.n_labels        = info['n_labels']
             stats.labels          = list(info['labels'])
             stats.budget_final    = info['budget']
+            stats.mean_act_time_ms   = float(np.mean(act_times))   if act_times   else 0.0
+            stats.mean_train_time_ms = float(np.mean(train_times)) if train_times else 0.0
             stats.mean_loss       = float(np.mean(losses))       if losses       else 0.0
             stats.mean_trans_loss = float(np.mean(trans_losses)) if trans_losses else 0.0
             stats.epist_per_action = {
@@ -2209,6 +2221,10 @@ def _run_one(task: dict) -> dict:
     wlog = _WandbLogger(agent_name=agent_name, seed=seed, cfg=cfg, **wandb_kw)
 
     ep_rewards, ep_wins, ep_labels, ep_labelA, ep_budget = [], [], [], [], []
+    # label purchase sequences collected from episode n_episodes//2 onwards
+    late_label_seqs: List[tuple] = []
+    _seq_start = n_episodes // 2
+    _cluster_names = {0: 'A', 1: 'B', 2: 'C', 3: 'D'}
 
     for ep in range(n_episodes):
         at_log = log_interval > 0 and (ep + 1) % log_interval == 0
@@ -2218,6 +2234,14 @@ def _run_one(task: dict) -> dict:
         ep_labels.append(stats.n_labels)
         ep_labelA.append(int(stats.labels[0]))
         ep_budget.append(stats.budget_final)
+
+        # Collect label-buy sequence (ordered by step) from the second half of training
+        if ep >= _seq_start:
+            seq = tuple(
+                _cluster_names[uid]
+                for _, uid in sorted(stats.label_buy_steps, key=lambda x: x[0])
+            )
+            late_label_seqs.append(seq)
 
         if verbose:
             for step_idx, uid in stats.label_buy_steps:
@@ -2244,18 +2268,24 @@ def _run_one(task: dict) -> dict:
             print(line, flush=True)
 
         mean_reward = stats.total_reward / max(stats.n_steps, 1)
+        # Step at which label A was purchased this episode (-1 = not bought)
+        label_A_step = next(
+            (s for s, uid in stats.label_buy_steps if uid == 0), -1
+        )
         wm = dict(reward=mean_reward, win=int(stats.win),
                   reward_sum=stats.total_reward,
                   n_labels=stats.n_labels, label_A=int(stats.labels[0]),
+                  label_A_step=label_A_step,
                   budget_final=stats.budget_final, n_steps=stats.n_steps,
                   loss=stats.mean_loss,
                   classification_reward=stats.classification_reward,
                   clustering_reward=stats.clustering_reward,
                   cti_cost=stats.cti_cost,
                   inference_confidence=stats.inference_confidence)
+        wm['profiling/act_time_ms']   = stats.mean_act_time_ms
+        wm['profiling/train_time_ms'] = stats.mean_train_time_ms
         if agent_name in _HAS_TRANS:
             wm['trans_loss'] = stats.mean_trans_loss
-        _cluster_names = {0: 'A', 1: 'B', 2: 'C', 3: 'D'}
         for uid, cname in _cluster_names.items():
             wm[f'unk_confs/{cname}'] = stats.unk_conf_mean.get(uid, 0.0)
         if agent_name in _EPIST_AGENTS:
@@ -2286,6 +2316,18 @@ def _run_one(task: dict) -> dict:
             f'{phase}/win_rate':     float(np.mean(ep_wins[sl])),
             f'{phase}/label_A_rate': float(np.mean(ep_labelA[sl])),
         })
+
+    # Most common label-purchase sequence in the second half of training
+    if late_label_seqs:
+        seq_counter = collections.Counter(late_label_seqs)
+        top_seq, top_count = seq_counter.most_common(1)[0]
+        seq_str = '→'.join(top_seq) if top_seq else '(none)'
+        wlog.summary({
+            'label_seq/most_common':       seq_str,
+            'label_seq/most_common_count': top_count,
+            'label_seq/total_episodes':    len(late_label_seqs),
+        })
+
     wlog.finish()
 
     return dict(seed=seed, agent=agent_name,
