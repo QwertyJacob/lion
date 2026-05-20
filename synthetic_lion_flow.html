@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Synthetic LION – Information Flow</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0f1117;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    color: #e2e8f0;
+    min-height: 100vh;
+    padding: 24px;
+  }
+  h1 {
+    text-align: center;
+    font-size: 1.25rem;
+    font-weight: 700;
+    letter-spacing: .04em;
+    color: #93c5fd;
+    margin-bottom: 6px;
+  }
+  .subtitle {
+    text-align: center;
+    font-size: .75rem;
+    color: #64748b;
+    margin-bottom: 28px;
+  }
+  svg {
+    display: block;
+    margin: 0 auto;
+    max-width: 100%;
+  }
+  /* tooltip */
+  .tt {
+    position: fixed;
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: .72rem;
+    color: #cbd5e1;
+    max-width: 280px;
+    pointer-events: none;
+    display: none;
+    z-index: 999;
+    line-height: 1.55;
+  }
+  .tt strong { color: #93c5fd; }
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 20px;
+    justify-content: center;
+    margin-top: 22px;
+  }
+  .leg-item { display: flex; align-items: center; gap: 6px; font-size: .72rem; color: #94a3b8; }
+  .leg-dot { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
+</style>
+</head>
+<body>
+<h1>Synthetic LION — Information & Prototype Flow</h1>
+<p class="subtitle">Hover over any node for details</p>
+
+<svg id="diagram" viewBox="0 0 1060 830" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- arrow markers -->
+    <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#64748b"/>
+    </marker>
+    <marker id="arr-blue" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#60a5fa"/>
+    </marker>
+    <marker id="arr-green" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#4ade80"/>
+    </marker>
+    <marker id="arr-orange" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#fb923c"/>
+    </marker>
+    <marker id="arr-red" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#f87171"/>
+    </marker>
+    <marker id="arr-purple" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#a78bfa"/>
+    </marker>
+    <marker id="arr-yellow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#fbbf24"/>
+    </marker>
+
+    <!-- glow filters -->
+    <filter id="glow-blue" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="glow-green" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#000" flood-opacity="0.5"/>
+    </filter>
+  </defs>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       BACKGROUND SECTIONS
+  ═══════════════════════════════════════════════════════════ -->
+
+  <!-- Data generation zone -->
+  <rect x="10" y="10" width="200" height="160" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.2" stroke-dasharray="5,3"/>
+  <text x="110" y="30" text-anchor="middle" font-size="10" fill="#475569" font-weight="600" letter-spacing=".08em">DATA GENERATION</text>
+
+  <!-- Inference module zone -->
+  <rect x="240" y="10" width="440" height="360" rx="10" fill="#1a2035" stroke="#334155" stroke-width="1.2" stroke-dasharray="5,3"/>
+  <text x="460" y="30" text-anchor="middle" font-size="10" fill="#475569" font-weight="600" letter-spacing=".08em">INFERENCE MODULE  (InferenceModule)</text>
+
+  <!-- Prototype zone within inference -->
+  <rect x="530" y="40" width="135" height="180" rx="8" fill="#0f172a" stroke="#1e3a5f" stroke-width="1" stroke-dasharray="3,3"/>
+  <text x="597" y="57" text-anchor="middle" font-size="9" fill="#1e3a8a" font-weight="600">PROTOTYPES</text>
+
+  <!-- Environment zone -->
+  <rect x="10" y="200" width="200" height="170" rx="10" fill="#1e2030" stroke="#334155" stroke-width="1.2" stroke-dasharray="5,3"/>
+  <text x="110" y="220" text-anchor="middle" font-size="10" fill="#475569" font-weight="600" letter-spacing=".08em">STATE BUILDER</text>
+
+  <!-- Agent / Decision zone -->
+  <rect x="10" y="400" width="670" height="230" rx="10" fill="#1a1f2e" stroke="#334155" stroke-width="1.2" stroke-dasharray="5,3"/>
+  <text x="345" y="420" text-anchor="middle" font-size="10" fill="#475569" font-weight="600" letter-spacing=".08em">AGENT  (TwoStreamNet backbone)</text>
+
+  <!-- Buffer zone -->
+  <rect x="700" y="400" width="350" height="230" rx="10" fill="#1e1a2e" stroke="#334155" stroke-width="1.2" stroke-dasharray="5,3"/>
+  <text x="875" y="420" text-anchor="middle" font-size="10" fill="#475569" font-weight="600" letter-spacing=".08em">MEMORY BUFFERS</text>
+
+  <!-- Outcomes zone -->
+  <rect x="10" y="660" width="1040" height="150" rx="10" fill="#101820" stroke="#334155" stroke-width="1.2" stroke-dasharray="5,3"/>
+  <text x="530" y="678" text-anchor="middle" font-size="10" fill="#475569" font-weight="600" letter-spacing=".08em">ACTION OUTCOMES  (per decision branch)</text>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       NODES
+  ═══════════════════════════════════════════════════════════ -->
+
+  <!-- 1. DataGenerator -->
+  <g class="node" data-tip="<strong>DataGenerator</strong><br>7 Gaussian clusters in 2D.<br>Known: K0 benign(−2,0), K1 benign(2,0), K2 malicious(0,−2).<br>Unknown: UA mal-overlap, UB mal-sep, UC ben-sep, UD ben-nearmal.<br>Returns (x, class_id, is_known, unknown_id, class_type).">
+    <rect x="20" y="45" width="180" height="52" rx="8" fill="#1e3a5f" stroke="#3b82f6" stroke-width="1.5" filter="url(#shadow)"/>
+    <text x="110" y="66" text-anchor="middle" font-size="11" font-weight="700" fill="#93c5fd">DataGenerator</text>
+    <text x="110" y="82" text-anchor="middle" font-size="9.5" fill="#60a5fa">7 Gaussians (2-D)</text>
+    <text x="110" y="95" text-anchor="middle" font-size="9" fill="#4a7fa5">K0,K1,K2 + UA,UB,UC,UD</text>
+  </g>
+
+  <!-- 2. Encoder -->
+  <g class="node" data-tip="<strong>Encoder</strong><br>Linear(2→48) → ReLU → Linear(48→24).<br>Pretrained for 120 epochs on K0/K1/K2.<br>Produces 24-dim hidden vector h.">
+    <rect x="252" y="45" width="140" height="52" rx="8" fill="#1e3a5f" stroke="#3b82f6" stroke-width="1.5" filter="url(#shadow)"/>
+    <text x="322" y="66" text-anchor="middle" font-size="11" font-weight="700" fill="#93c5fd">Encoder</text>
+    <text x="322" y="82" text-anchor="middle" font-size="9.5" fill="#60a5fa">Linear(2→48)→ReLU</text>
+    <text x="322" y="95" text-anchor="middle" font-size="9" fill="#4a7fa5">→ Linear(48→24) → h</text>
+  </g>
+
+  <!-- 3. Known protos -->
+  <g class="node" data-tip="<strong>known_protos (nn.Parameter)</strong><br>Supervised prototypes, shape (n_known, 24).<br>Initially n_known=3 (K0,K1,K2).<br>Grown by 1 row each time a CTI label is bought — the cluster's EMA prototype is promoted here.<br>Differentiable; updated via prototypical loss during pretraining.">
+    <rect x="538" y="62" width="118" height="54" rx="7" fill="#14301a" stroke="#4ade80" stroke-width="1.5" filter="url(#shadow)"/>
+    <text x="597" y="83" text-anchor="middle" font-size="10.5" font-weight="700" fill="#86efac">known_protos</text>
+    <text x="597" y="97" text-anchor="middle" font-size="9" fill="#4ade80">nn.Parameter</text>
+    <text x="597" y="109" text-anchor="middle" font-size="9" fill="#166534">(n_known × 24)</text>
+  </g>
+
+  <!-- 4. Unknown protos -->
+  <g class="node" data-tip="<strong>unk_protos (register_buffer)</strong><br>EMA buffers, not backprop-trained.<br>Shape (4, 24) — one row per unknown cluster.<br>Updated online: ema_proto = (1−α)·ema_proto + α·h  with α=0.08.<br>When a label is bought, that row is copied to known_protos and the row in unk_protos is frozen.">
+    <rect x="538" y="130" width="118" height="54" rx="7" fill="#2d1a14" stroke="#fb923c" stroke-width="1.5" filter="url(#shadow)"/>
+    <text x="597" y="151" text-anchor="middle" font-size="10.5" font-weight="700" fill="#fdba74">unk_protos</text>
+    <text x="597" y="165" text-anchor="middle" font-size="9" fill="#fb923c">register_buffer</text>
+    <text x="597" y="177" text-anchor="middle" font-size="9" fill="#7c3011">(4 × 24) EMA α=0.08</text>
+  </g>
+
+  <!-- 5. unk_conf / unk_size -->
+  <g class="node" data-tip="<strong>unk_conf / unk_size (register_buffer)</strong><br>unk_conf[u]: running EMA softmax confidence score for unknown cluster u.<br>Zeroed immediately when label for u is bought.<br>unk_size[u]: count of flows assigned to cluster u.<br>Both are purely EMA — no gradient.">
+    <rect x="538" y="198" width="118" height="38" rx="7" fill="#251a2d" stroke="#a78bfa" stroke-width="1.5" filter="url(#shadow)"/>
+    <text x="597" y="214" text-anchor="middle" font-size="10" font-weight="700" fill="#c4b5fd">unk_conf / unk_size</text>
+    <text x="597" y="228" text-anchor="middle" font-size="9" fill="#7c3aed">register_buffer (EMA)</text>
+  </g>
+
+  <!-- 6. Known classify block -->
+  <g class="node" data-tip="<strong>known_classify(h)</strong><br>Computes L2 distances from h to all known_protos rows.<br>Applies softmax(−dist × τ_p=3.0) to get class probabilities.<br>Returns (pred_class, confidence, distances).">
+    <rect x="420" y="62" width="108" height="54" rx="7" fill="#1e293b" stroke="#60a5fa" stroke-width="1.3"/>
+    <text x="474" y="83" text-anchor="middle" font-size="10" font-weight="700" fill="#93c5fd">known_classify</text>
+    <text x="474" y="97" text-anchor="middle" font-size="9" fill="#60a5fa">cdist → softmax(−d·τ)</text>
+    <text x="474" y="109" text-anchor="middle" font-size="9" fill="#475569">→ pred, conf, dists</text>
+  </g>
+
+  <!-- 7. Anomaly detect -->
+  <g class="node" data-tip="<strong>anomaly_detect(dists_to_known)</strong><br>anomaly_score = min(dists_to_known).<br>is_anomaly = score > threshold (δ=1.8).<br>Output fed into exteroceptive state slot [2].">
+    <rect x="420" y="132" width="108" height="44" rx="7" fill="#1e293b" stroke="#60a5fa" stroke-width="1.3"/>
+    <text x="474" y="150" text-anchor="middle" font-size="10" font-weight="700" fill="#93c5fd">anomaly_detect</text>
+    <text x="474" y="164" text-anchor="middle" font-size="9" fill="#60a5fa">min_dist > δ=1.8?</text>
+  </g>
+
+  <!-- 8. Unknown cluster head -->
+  <g class="node" data-tip="<strong>unknown_cluster(h)</strong><br>Differentiable soft-assignment to unknown prototypes.<br>dists = cdist(h, unk_protos).<br>soft_assign = softmax(−dists · τ_p).<br>Updates unk_protos via EMA and increments unk_size / unk_conf.">
+    <rect x="420" y="192" width="108" height="54" rx="7" fill="#1e293b" stroke="#60a5fa" stroke-width="1.3"/>
+    <text x="474" y="211" text-anchor="middle" font-size="10" font-weight="700" fill="#93c5fd">unknown_cluster</text>
+    <text x="474" y="225" text-anchor="middle" font-size="9" fill="#60a5fa">soft-assign → EMA</text>
+    <text x="474" y="237" text-anchor="middle" font-size="9" fill="#475569">update unk_protos</text>
+  </g>
+
+  <!-- 9. is_known branch diamond -->
+  <g class="node" data-tip="<strong>is_known branch</strong><br>Decides routing of the current flow:<br>• True → run known_classify (get pred, conf, dists).<br>• False → run both anomaly_detect AND unknown_cluster.">
+    <polygon points="322,132 352,157 322,182 292,157" fill="#1e293b" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="322" y="154" text-anchor="middle" font-size="9" font-weight="700" fill="#fbbf24">is</text>
+    <text x="322" y="166" text-anchor="middle" font-size="9" font-weight="700" fill="#fbbf24">known?</text>
+  </g>
+
+  <!-- ── State builder: extero / proprio ── -->
+
+  <!-- 10. Exteroceptive -->
+  <g class="node" data-tip="<strong>Exteroceptive vector (5D)</strong><br>[0] known_pred_norm = pred / (n_known−1)<br>[1] known_conf = max softmax prob<br>[2] anomaly_score_norm = min_dist / 5 (clip 1)<br>[3] proto_x = x[0] / 5<br>[4] proto_y = x[1] / 5">
+    <rect x="20" y="230" width="180" height="62" rx="8" fill="#172030" stroke="#3b82f6" stroke-width="1.5" filter="url(#shadow)"/>
+    <text x="110" y="250" text-anchor="middle" font-size="10.5" font-weight="700" fill="#93c5fd">Exteroceptive (5D)</text>
+    <text x="110" y="265" text-anchor="middle" font-size="9" fill="#60a5fa">pred_norm · conf · anom_score</text>
+    <text x="110" y="278" text-anchor="middle" font-size="9" fill="#60a5fa">· x_norm · y_norm</text>
+    <text x="110" y="291" text-anchor="middle" font-size="8.5" fill="#334155">→ perception of current flow</text>
+  </g>
+
+  <!-- 11. Proprioceptive -->
+  <g class="node" data-tip="<strong>Proprioceptive vector (9D)</strong><br>[0..3] unk_conf[0..3]  EMA confidence per cluster<br>[4] n_labels_bought_frac = bought/4<br>[5] budget_frac = budget/8<br>[6] label_price_frac = price/8 (0 if known)<br>[7] time_frac = step/30<br>[8] known_conf_norm (repeated)<br>unk_conf[u] zeroed when label u bought — creates max epistemic gain.">
+    <rect x="20" y="302" width="180" height="62" rx="8" fill="#1a1530" stroke="#a78bfa" stroke-width="1.5" filter="url(#shadow)"/>
+    <text x="110" y="322" text-anchor="middle" font-size="10.5" font-weight="700" fill="#c4b5fd">Proprioceptive (9D)</text>
+    <text x="110" y="337" text-anchor="middle" font-size="9" fill="#a78bfa">unk_conf[0..3] · labels · budget</text>
+    <text x="110" y="350" text-anchor="middle" font-size="9" fill="#a78bfa">· price · time · conf_norm</text>
+    <text x="110" y="363" text-anchor="middle" font-size="8.5" fill="#334155">→ internal/epistemic state</text>
+  </g>
+
+  <!-- 12. State concat -->
+  <g class="node" data-tip="<strong>State vector s (14D)</strong><br>Concatenation of exteroceptive (5D) and proprioceptive (9D) vectors.<br>Passed to the agent's TwoStreamNet each step.<br>Each stream is processed separately (hidden=48) then merged.">
+    <rect x="252" y="285" width="140" height="46" rx="8" fill="#1e2535" stroke="#6b7280" stroke-width="1.3" filter="url(#shadow)"/>
+    <text x="322" y="305" text-anchor="middle" font-size="11" font-weight="700" fill="#cbd5e1">State  s  (14D)</text>
+    <text x="322" y="320" text-anchor="middle" font-size="9" fill="#94a3b8">[extero(5) ‖ proprio(9)]</text>
+    <text x="322" y="333" text-anchor="middle" font-size="8.5" fill="#475569">→ TwoStreamNet input</text>
+  </g>
+
+  <!-- ── Agent internals ── -->
+
+  <!-- 13. TwoStreamNet -->
+  <g class="node" data-tip="<strong>TwoStreamNet</strong><br>Shared backbone for all learned agents.<br>Stream 1: Linear(5→48)→ReLU×2 (exteroceptive)<br>Stream 2: Linear(9→48)→ReLU×2 (proprioceptive)<br>Concat → Linear(96→out_dim).<br>Out: Q-values (DDQN/Dueling/DAI) or policy logits (PPO/SAC).">
+    <rect x="20" y="435" width="165" height="56" rx="8" fill="#1e293b" stroke="#6b7280" stroke-width="1.5" filter="url(#shadow)"/>
+    <text x="103" y="455" text-anchor="middle" font-size="11" font-weight="700" fill="#e2e8f0">TwoStreamNet</text>
+    <text x="103" y="470" text-anchor="middle" font-size="9" fill="#94a3b8">extero-stream  +  proprio-stream</text>
+    <text x="103" y="483" text-anchor="middle" font-size="9" fill="#64748b">hidden=48 each → concat</text>
+  </g>
+
+  <!-- 14. Action decision diamond -->
+  <g class="node" data-tip="<strong>Action selection</strong><br>Action space: {0=block, 1=accept, 2=buy-label}.<br>DDQN/Dueling: argmax Q (ε-greedy).<br>DAI variants: Boltzmann softmax(β×EFE) with β=100 (near-deterministic).<br>PPO: sample from actor softmax.<br>SAC: Categorical from actor logits (max-entropy).">
+    <polygon points="250,462 290,487 250,512 210,487" fill="#1e293b" stroke="#fbbf24" stroke-width="1.8"/>
+    <text x="250" y="484" text-anchor="middle" font-size="9" font-weight="700" fill="#fbbf24">action</text>
+    <text x="250" y="496" text-anchor="middle" font-size="9" font-weight="700" fill="#fbbf24">select</text>
+  </g>
+
+  <!-- 15. TransitionNet (DAI-P/A/F) -->
+  <g class="node" data-tip="<strong>TransitionNet (DAI-P/A/F only)</strong><br>Linear(14+3→48)→ReLU→Linear(48→48)→ReLU→Linear(48→9)<br>Predicts next proprioceptive state from (s, a_onehot).<br>Trained concurrently with MSE loss.<br>Epistemic gain = 0.5 × ||s'_prop − TransitionNet(s,a)||².<br>Label purchase zeroes unk_conf[u] → maximum prediction error → max epistemic gain.">
+    <rect x="340" y="435" width="165" height="56" rx="8" fill="#1a1530" stroke="#a78bfa" stroke-width="1.5" filter="url(#shadow)"/>
+    <text x="423" y="455" text-anchor="middle" font-size="11" font-weight="700" fill="#c4b5fd">TransitionNet</text>
+    <text x="423" y="470" text-anchor="middle" font-size="9" fill="#a78bfa">Linear(17→48)→×2→Linear(48→9)</text>
+    <text x="423" y="483" text-anchor="middle" font-size="9" fill="#6d28d9">→ pred next proprio</text>
+  </g>
+
+  <!-- 16. EFE-net -->
+  <g class="node" data-tip="<strong>EFE-net (DAI variants)</strong><br>TwoStreamNet with out_dim=3 → Expected Free Energy per action.<br>Target: EFE(s,a) = r + ε_w × epistemic_gain + γ × EFE(s', a*).<br>Action: Boltzmann softmax(β=100 × EFE).<br>Has a target copy hard-updated every 20 gradient steps.">
+    <rect x="520" y="435" width="145" height="56" rx="8" fill="#1a2530" stroke="#38bdf8" stroke-width="1.5" filter="url(#shadow)"/>
+    <text x="593" y="455" text-anchor="middle" font-size="11" font-weight="700" fill="#7dd3fc">EFE-net</text>
+    <text x="593" y="470" text-anchor="middle" font-size="9" fill="#38bdf8">TwoStreamNet(→3)</text>
+    <text x="593" y="483" text-anchor="middle" font-size="9" fill="#0e4a6e">Boltzmann β=100 policy</text>
+  </g>
+
+  <!-- ── Buffers ── -->
+
+  <!-- 17. ReplayBuffer -->
+  <g class="node" data-tip="<strong>ReplayBuffer</strong><br>Circular buffer capacity=6000.<br>Stores transitions (s, a, r, s', done).<br>Used by: DDQN, Dueling, SAC, DAI-P, DAI-A, DAI-F, DAI-SA.<br>Min 128 transitions before training starts.<br>Mini-batch size=64, sampled randomly.">
+    <rect x="712" y="435" width="160" height="56" rx="8" fill="#1e1830" stroke="#f472b6" stroke-width="1.5" filter="url(#shadow)"/>
+    <text x="792" y="455" text-anchor="middle" font-size="11" font-weight="700" fill="#f9a8d4">ReplayBuffer</text>
+    <text x="792" y="470" text-anchor="middle" font-size="9" fill="#f472b6">capacity=6000 transitions</text>
+    <text x="792" y="483" text-anchor="middle" font-size="9" fill="#831843">(s, a, r, s', done)</text>
+  </g>
+
+  <!-- 18. PPO Rollout -->
+  <g class="node" data-tip="<strong>_PPORollout (PPO only)</strong><br>On-policy episode buffer — cleared after each episode.<br>Stores (state, action, reward, log_prob, value, done).<br>At episode end: computes GAE advantages (λ=0.95), runs 4 gradient epochs with clipped surrogate loss (ε=0.20), value coeff=0.50, entropy bonus=0.01.<br>No experience replay — each trajectory used once.">
+    <rect x="884" y="435" width="155" height="56" rx="8" fill="#1e2015" stroke="#84cc16" stroke-width="1.5" filter="url(#shadow)"/>
+    <text x="961" y="455" text-anchor="middle" font-size="11" font-weight="700" fill="#bef264">_PPORollout</text>
+    <text x="961" y="470" text-anchor="middle" font-size="9" fill="#84cc16">on-policy episode buffer</text>
+    <text x="961" y="483" text-anchor="middle" font-size="9" fill="#3f6212">(state,a,r,logp,v,done)</text>
+  </g>
+
+  <!-- ── Outcomes ── -->
+
+  <!-- 19. Block -->
+  <g class="node" data-tip="<strong>Block (action=0)</strong><br>Flow is rejected. Reward depends on class:<br>Known benign → −2.5 | Known malicious → +2.5<br>Unknown unlabelled: varies by cluster (e.g. UA: +0.5 / UB: +1.5 / UC: −1.5 / UD: −1.0).<br>Budget unchanged. unk_conf updated via EMA.">
+    <rect x="22" y="690" width="145" height="52" rx="8" fill="#2d1515" stroke="#f87171" stroke-width="1.5" filter="url(#shadow)"/>
+    <text x="95" y="712" text-anchor="middle" font-size="11" font-weight="700" fill="#fca5a5">Block</text>
+    <text x="95" y="727" text-anchor="middle" font-size="9" fill="#f87171">action = 0</text>
+    <text x="95" y="739" text-anchor="middle" font-size="8.5" fill="#7f1d1d">r ← class-dependent</text>
+  </g>
+
+  <!-- 20. Accept -->
+  <g class="node" data-tip="<strong>Accept (action=1)</strong><br>Flow is forwarded. Reward:<br>Known benign → +2.0 | Known malicious → −5.0<br>Unknown unlabelled: varies (e.g. UA: −7.0 / UB: −3.5 / UC: +0.5 / UD: +0.5).<br>Budget unchanged. unk_conf updated via EMA.">
+    <rect x="182" y="690" width="145" height="52" rx="8" fill="#152d15" stroke="#4ade80" stroke-width="1.5" filter="url(#shadow)"/>
+    <text x="255" y="712" text-anchor="middle" font-size="11" font-weight="700" fill="#86efac">Accept</text>
+    <text x="255" y="727" text-anchor="middle" font-size="9" fill="#4ade80">action = 1</text>
+    <text x="255" y="739" text-anchor="middle" font-size="8.5" fill="#14532d">r ← class-dependent</text>
+  </g>
+
+  <!-- 21. Buy Label branch -->
+  <g class="node" data-tip="<strong>Buy Label (action=2)</strong><br>Agent purchases CTI label for current unknown cluster u.<br>Conditions: is_unknown=True, label_u not yet bought, budget ≥ price[u].<br>On success: unk_conf[u] ← 0 (zeroed), unk_proto[u] promoted to known_protos, future flows from u classified as known.<br>Budget debited by price[u]. Tiny immediate reward (−price×0.05).<br>Invalid purchase: penalty −0.3, budget unchanged.">
+    <rect x="342" y="690" width="145" height="52" rx="8" fill="#1a2015" stroke="#fbbf24" stroke-width="1.5" filter="url(#shadow)"/>
+    <text x="415" y="712" text-anchor="middle" font-size="11" font-weight="700" fill="#fde68a">Buy Label</text>
+    <text x="415" y="727" text-anchor="middle" font-size="9" fill="#fbbf24">action = 2  (if valid)</text>
+    <text x="415" y="739" text-anchor="middle" font-size="8.5" fill="#78350f">budget −= price[u]</text>
+  </g>
+
+  <!-- 21b. Buy-label consequences box -->
+  <g class="node" data-tip="<strong>Label Purchase Consequences</strong><br>1. unk_protos[u] row copied to known_protos (grows by 1).<br>2. unk_conf[u] set to 0 — sharp proprioceptive change.<br>3. future flows from cluster u now route through known_classify.<br>This triggers maximum TransitionNet prediction error → maximum epistemic gain for DAI-P/A/F agents.">
+    <rect x="502" y="690" width="200" height="52" rx="8" fill="#1a2010" stroke="#fbbf24" stroke-width="1" stroke-dasharray="4,2" filter="url(#shadow)"/>
+    <text x="602" y="710" text-anchor="middle" font-size="10" font-weight="700" fill="#fde68a">Prototype Promotion</text>
+    <text x="602" y="725" text-anchor="middle" font-size="8.5" fill="#fbbf24">unk_protos[u] → known_protos</text>
+    <text x="602" y="738" text-anchor="middle" font-size="8.5" fill="#fbbf24">unk_conf[u] ← 0  (zeroed)</text>
+  </g>
+
+  <!-- 22. Invalid buy -->
+  <g class="node" data-tip="<strong>Invalid Buy</strong><br>Triggered when buy-label attempted but:<br>  (a) flow is known (not unknown), or<br>  (b) label already bought for this cluster, or<br>  (c) budget < price.<br>Penalty = −0.3. No state change, no prototype change.">
+    <rect x="717" y="690" width="145" height="52" rx="8" fill="#2d1a1a" stroke="#f87171" stroke-width="1" stroke-dasharray="4,2"/>
+    <text x="790" y="712" text-anchor="middle" font-size="10.5" font-weight="700" fill="#fca5a5">Invalid Buy</text>
+    <text x="790" y="727" text-anchor="middle" font-size="9" fill="#f87171">penalty = −0.3</text>
+    <text x="790" y="739" text-anchor="middle" font-size="8.5" fill="#7f1d1d">no prototype change</text>
+  </g>
+
+  <!-- 23. Episode end -->
+  <g class="node" data-tip="<strong>Episode End</strong><br>After 30 steps (max_steps): episode terminates.<br>Win if cumulative reward ≥ 40.<br>For off-policy agents (DDQN,SAC,DAI*): replay buffer persists.<br>For PPO: rollout buffer cleared, gradient update applied.">
+    <rect x="877" y="690" width="160" height="52" rx="8" fill="#1a2030" stroke="#60a5fa" stroke-width="1.5" filter="url(#shadow)"/>
+    <text x="957" y="710" text-anchor="middle" font-size="11" font-weight="700" fill="#93c5fd">Episode End</text>
+    <text x="957" y="725" text-anchor="middle" font-size="9" fill="#60a5fa">30 steps / win ≥ 40</text>
+    <text x="957" y="738" text-anchor="middle" font-size="8.5" fill="#1e3a5f">PPO: rollout cleared + update</text>
+  </g>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       EDGES
+  ═══════════════════════════════════════════════════════════ -->
+
+  <!-- DataGenerator → Encoder (raw x 2D) -->
+  <line x1="200" y1="71" x2="250" y2="71" stroke="#60a5fa" stroke-width="1.5" marker-end="url(#arr-blue)"/>
+  <text x="225" y="66" text-anchor="middle" font-size="8" fill="#60a5fa">x (2D)</text>
+
+  <!-- DataGenerator → is_known -->
+  <line x1="110" y1="97" x2="110" y2="157" stroke="#fbbf24" stroke-width="1.3" stroke-dasharray="4,3" marker-end="url(#arr-yellow)"/>
+  <line x1="110" y1="157" x2="290" y2="157" stroke="#fbbf24" stroke-width="1.3" stroke-dasharray="4,3" marker-end="url(#arr-yellow)"/>
+  <text x="175" y="152" text-anchor="middle" font-size="8" fill="#fbbf24">is_known?</text>
+
+  <!-- Encoder → is_known (h) -->
+  <line x1="322" y1="97" x2="322" y2="130" stroke="#60a5fa" stroke-width="1.5" marker-end="url(#arr-blue)"/>
+  <text x="333" y="118" font-size="8" fill="#60a5fa">h (24D)</text>
+
+  <!-- is_known → known_classify (YES) -->
+  <line x1="352" y1="157" x2="420" y2="89" stroke="#4ade80" stroke-width="1.4" marker-end="url(#arr-green)"/>
+  <text x="393" y="116" text-anchor="middle" font-size="8" fill="#4ade80">yes</text>
+
+  <!-- is_known → anomaly_detect (NO) -->
+  <line x1="352" y1="157" x2="420" y2="154" stroke="#f87171" stroke-width="1.4" marker-end="url(#arr-red)"/>
+  <text x="395" y="148" text-anchor="middle" font-size="8" fill="#f87171">no</text>
+
+  <!-- is_known → unknown_cluster (NO) -->
+  <line x1="322" y1="182" x2="322" y2="219" stroke="#f87171" stroke-width="1" stroke-dasharray="3,2"/>
+  <line x1="322" y1="219" x2="420" y2="219" stroke="#f87171" stroke-width="1" stroke-dasharray="3,2" marker-end="url(#arr-red)"/>
+
+  <!-- known_classify → known_protos -->
+  <line x1="528" y1="89" x2="538" y2="89" stroke="#4ade80" stroke-width="1.3" marker-end="url(#arr-green)"/>
+  <text x="534" y="83" text-anchor="middle" font-size="7.5" fill="#4ade80">dist</text>
+
+  <!-- unknown_cluster → unk_protos -->
+  <line x1="528" y1="215" x2="538" y2="175" stroke="#fb923c" stroke-width="1.3" marker-end="url(#arr-orange)"/>
+  <text x="545" y="200" text-anchor="middle" font-size="7.5" fill="#fb923c">EMA update</text>
+
+  <!-- unknown_cluster → unk_conf -->
+  <line x1="528" y1="223" x2="538" y2="222" stroke="#a78bfa" stroke-width="1.3" marker-end="url(#arr-purple)"/>
+
+  <!-- known_classify → Exteroceptive -->
+  <line x1="474" y1="116" x2="474" y2="270" stroke="#60a5fa" stroke-width="1" stroke-dasharray="3,2"/>
+  <line x1="474" y1="270" x2="200" y2="261" stroke="#60a5fa" stroke-width="1" stroke-dasharray="3,2" marker-end="url(#arr-blue)"/>
+  <text x="340" y="265" text-anchor="middle" font-size="8" fill="#60a5fa">pred, conf</text>
+
+  <!-- anomaly_detect → Exteroceptive -->
+  <line x1="420" y1="154" x2="200" y2="268" stroke="#60a5fa" stroke-width="1" stroke-dasharray="3,2" marker-end="url(#arr-blue)"/>
+  <text x="300" y="200" text-anchor="middle" font-size="8" fill="#60a5fa">anom_score</text>
+
+  <!-- DataGenerator → Exteroceptive (raw x) -->
+  <line x1="110" y1="97" x2="110" y2="230" stroke="#60a5fa" stroke-width="1" stroke-dasharray="3,2" marker-end="url(#arr-blue)"/>
+  <text x="118" y="165" font-size="8" fill="#60a5fa">x_norm</text>
+
+  <!-- unk_conf → Proprioceptive -->
+  <line x1="538" y1="217" x2="240" y2="340" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,2" marker-end="url(#arr-purple)"/>
+  <text x="380" y="270" text-anchor="middle" font-size="8" fill="#a78bfa">unk_conf[0..3]</text>
+
+  <!-- budget/time → Proprioceptive (from env) -->
+  <text x="40" y="296" font-size="8.5" fill="#64748b">budget · time · price</text>
+  <line x1="110" y1="300" x2="110" y2="302" stroke="#a78bfa" stroke-width="1" marker-end="url(#arr-purple)"/>
+
+  <!-- Exteroceptive + Proprioceptive → State -->
+  <line x1="200" y1="261" x2="252" y2="310" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="200" y1="333" x2="252" y2="318" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- State → TwoStreamNet -->
+  <line x1="322" y1="331" x2="322" y2="395" stroke="#94a3b8" stroke-width="1.5"/>
+  <line x1="322" y1="395" x2="103" y2="435" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="210" y="390" text-anchor="middle" font-size="8.5" fill="#94a3b8">s (14D)</text>
+
+  <!-- State → TransitionNet (s, a_oh) -->
+  <line x1="322" y1="331" x2="423" y2="435" stroke="#a78bfa" stroke-width="1.3" stroke-dasharray="4,2" marker-end="url(#arr-purple)"/>
+  <text x="393" y="398" font-size="7.5" fill="#a78bfa">s ‖ a_oh</text>
+
+  <!-- State → EFE-net -->
+  <line x1="322" y1="331" x2="593" y2="435" stroke="#38bdf8" stroke-width="1.3" stroke-dasharray="4,2" marker-end="url(#arr-blue)"/>
+
+  <!-- TwoStreamNet → Action select -->
+  <line x1="185" y1="463" x2="210" y2="480" stroke="#fbbf24" stroke-width="1.8" marker-end="url(#arr-yellow)"/>
+  <text x="196" y="458" font-size="8.5" fill="#fbbf24">Q / logits</text>
+
+  <!-- EFE-net → Action select -->
+  <line x1="520" y1="463" x2="290" y2="480" stroke="#38bdf8" stroke-width="1.3" stroke-dasharray="4,2" marker-end="url(#arr-blue)"/>
+  <text x="430" y="458" font-size="7.5" fill="#38bdf8">EFE(s,·)</text>
+
+  <!-- TransitionNet → Action select (epistemic gain) -->
+  <line x1="423" y1="435" x2="278" y2="487" stroke="#a78bfa" stroke-width="1.2" stroke-dasharray="3,2" marker-end="url(#arr-purple)"/>
+  <text x="360" y="476" font-size="7.5" fill="#a78bfa">epist. gain</text>
+
+  <!-- Action select → Block -->
+  <line x1="225" y1="499" x2="95" y2="690" stroke="#f87171" stroke-width="1.5" marker-end="url(#arr-red)"/>
+  <text x="125" y="600" font-size="8" fill="#f87171">block</text>
+
+  <!-- Action select → Accept -->
+  <line x1="250" y1="512" x2="255" y2="690" stroke="#4ade80" stroke-width="1.5" marker-end="url(#arr-green)"/>
+  <text x="275" y="610" font-size="8" fill="#4ade80">accept</text>
+
+  <!-- Action select → Buy Label -->
+  <line x1="270" y1="499" x2="380" y2="690" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arr-yellow)"/>
+  <text x="345" y="600" font-size="8" fill="#fbbf24">buy-label</text>
+
+  <!-- Buy Label → Prototype Promotion -->
+  <line x1="487" y1="716" x2="502" y2="716" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arr-yellow)"/>
+  <text x="495" y="709" font-size="7.5" fill="#fbbf24">valid</text>
+
+  <!-- Buy Label → Invalid buy -->
+  <line x1="415" y1="742" x2="415" y2="780" stroke="#f87171" stroke-width="1" stroke-dasharray="3,2"/>
+  <line x1="415" y1="780" x2="717" y2="770" stroke="#f87171" stroke-width="1" stroke-dasharray="3,2" marker-end="url(#arr-red)"/>
+  <text x="595" y="775" font-size="7.5" fill="#f87171">invalid</text>
+
+  <!-- Prototype Promotion → known_protos (feedback) -->
+  <line x1="602" y1="690" x2="602" y2="380" stroke="#4ade80" stroke-width="1.2" stroke-dasharray="4,2"/>
+  <line x1="602" y1="380" x2="566" y2="116" stroke="#4ade80" stroke-width="1.2" stroke-dasharray="4,2" marker-end="url(#arr-green)"/>
+  <text x="630" y="380" font-size="8" fill="#4ade80">promote</text>
+  <text x="630" y="390" font-size="8" fill="#4ade80">unk→known</text>
+
+  <!-- Action select → ReplayBuffer (off-policy) -->
+  <line x1="290" y1="487" x2="712" y2="464" stroke="#f472b6" stroke-width="1.3" stroke-dasharray="4,2" marker-end="url(#arr)"/>
+  <text x="490" y="455" font-size="8" fill="#f472b6">push(s,a,r,s',done) — off-policy</text>
+
+  <!-- Action select → PPORollout (on-policy) -->
+  <line x1="270" y1="510" x2="884" y2="487" stroke="#84cc16" stroke-width="1.3" stroke-dasharray="4,2" marker-end="url(#arr)"/>
+  <text x="580" y="527" font-size="8" fill="#84cc16">push(s,a,r,logp,v,done) — PPO only</text>
+
+  <!-- Outcomes → Episode End -->
+  <line x1="957" y1="660" x2="957" y2="690" stroke="#60a5fa" stroke-width="1.3" stroke-dasharray="3,2" marker-end="url(#arr-blue)"/>
+
+  <!-- Episode loop arrow -->
+  <path d="M1020,716 Q1045,716 1045,400 Q1045,308 322,308" stroke="#475569" stroke-width="1" stroke-dasharray="5,3" fill="none" marker-end="url(#arr)"/>
+  <text x="1000" y="530" font-size="8" fill="#475569" transform="rotate(90,1000,530)">next episode</text>
+</svg>
+
+<div class="legend">
+  <div class="leg-item"><div class="leg-dot" style="background:#3b82f6"></div>Data / Encoding flow</div>
+  <div class="leg-item"><div class="leg-dot" style="background:#4ade80"></div>Known prototype (supervised)</div>
+  <div class="leg-item"><div class="leg-dot" style="background:#fb923c"></div>Unknown prototype (EMA buffer)</div>
+  <div class="leg-item"><div class="leg-dot" style="background:#a78bfa"></div>Proprioceptive / TransitionNet</div>
+  <div class="leg-item"><div class="leg-dot" style="background:#fbbf24"></div>Action selection / Buy-label</div>
+  <div class="leg-item"><div class="leg-dot" style="background:#f472b6"></div>ReplayBuffer (off-policy)</div>
+  <div class="leg-item"><div class="leg-dot" style="background:#84cc16"></div>PPORollout (on-policy)</div>
+  <div class="leg-item"><div class="leg-dot" style="background:#38bdf8"></div>EFE-net (DAI variants)</div>
+</div>
+
+<div class="tt" id="tooltip"></div>
+<script>
+  const tt = document.getElementById('tooltip');
+  document.querySelectorAll('.node').forEach(g => {
+    g.style.cursor = 'pointer';
+    g.addEventListener('mouseenter', e => {
+      tt.innerHTML = g.dataset.tip;
+      tt.style.display = 'block';
+    });
+    g.addEventListener('mousemove', e => {
+      tt.style.left = (e.clientX + 14) + 'px';
+      tt.style.top  = (e.clientY - 10) + 'px';
+    });
+    g.addEventListener('mouseleave', () => {
+      tt.style.display = 'none';
+    });
+  });
+</script>
+</body>
+</html>
