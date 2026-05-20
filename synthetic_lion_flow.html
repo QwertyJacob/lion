@@ -5,410 +5,360 @@
 <title>Synthetic LION – Information Flow</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    background: #ffffff;
-    font-family: 'Segoe UI', system-ui, sans-serif;
-    color: #1e293b;
-    padding: 24px;
-  }
-  h1 {
-    text-align: center;
-    font-size: 1.3rem;
-    font-weight: 700;
-    letter-spacing: .04em;
-    color: #1e3a8a;
-    margin-bottom: 6px;
-  }
-  .subtitle {
-    text-align: center;
-    font-size: .78rem;
-    color: #64748b;
-    margin-bottom: 24px;
-  }
-  svg { display: block; margin: 0 auto; max-width: 100%; }
-  .tt {
-    position: fixed;
-    background: #1e293b;
-    border: 1px solid #334155;
-    border-radius: 8px;
-    padding: 8px 13px;
-    font-size: .73rem;
-    color: #cbd5e1;
-    max-width: 320px;
-    pointer-events: none;
-    display: none;
-    z-index: 999;
-    line-height: 1.6;
+  body { background: #ffffff; font-family: 'Segoe UI', system-ui, sans-serif; padding: 20px; }
+  svg  { display: block; margin: 0 auto; max-width: 100%; }
+  .tt  {
+    position: fixed; background: #1e293b; border: 1px solid #334155;
+    border-radius: 8px; padding: 9px 13px; font-size: .73rem; color: #cbd5e1;
+    max-width: 320px; pointer-events: none; display: none; z-index: 999; line-height: 1.6;
   }
   .tt strong { color: #93c5fd; }
-  .legend {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px 22px;
-    justify-content: center;
-    margin-top: 22px;
-  }
-  .leg-item { display: flex; align-items: center; gap: 7px; font-size: .75rem; color: #475569; }
-  .leg-dot { width: 13px; height: 13px; border-radius: 3px; flex-shrink: 0; }
+  .legend { display: flex; flex-wrap: wrap; gap: 10px 22px; justify-content: center; margin-top: 20px; }
+  .leg-item { display: flex; align-items: center; gap: 7px; font-size: .78rem; color: #475569; }
+  .leg-dot  { width: 13px; height: 13px; border-radius: 3px; flex-shrink: 0; }
 </style>
 </head>
 <body>
-<h1>Synthetic LION — Information &amp; Prototype Flow</h1>
-<p class="subtitle">Hover over any node for details</p>
 
-<svg id="diagram" viewBox="0 0 1260 980" xmlns="http://www.w3.org/2000/svg">
+<!--
+  LAYOUT  (viewBox 1280 × 840)
+  Left column  35% → x=12, w=428  (Data Gen zone + State Builder zone)
+  Right column 65% → x=452, w=816 (Inference Module)
+  Below both: Agent zone (x=12,w=838) + Buffer zone (x=862,w=406)
+  Bottom: Outcomes zone (x=12,w=1256)
+-->
+
+<svg id="diagram" viewBox="0 0 1280 840" xmlns="http://www.w3.org/2000/svg">
 <defs>
-  <!-- Arrow markers (dark, visible on white) -->
   <marker id="m-grey"   markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3z" fill="#475569"/></marker>
-  <marker id="m-blue"   markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3z" fill="#2563eb"/></marker>
+  <marker id="m-blue"   markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3z" fill="#1d4ed8"/></marker>
   <marker id="m-green"  markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3z" fill="#15803d"/></marker>
   <marker id="m-orange" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3z" fill="#c2410c"/></marker>
   <marker id="m-purple" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3z" fill="#7c3aed"/></marker>
   <marker id="m-amber"  markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3z" fill="#b45309"/></marker>
   <marker id="m-red"    markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3z" fill="#b91c1c"/></marker>
   <marker id="m-pink"   markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3z" fill="#a21caf"/></marker>
-  <marker id="m-lime"   markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3z" fill="#4d7c0f"/></marker>
   <marker id="m-sky"    markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3z" fill="#0369a1"/></marker>
-  <filter id="sh"><feDropShadow dx="0" dy="1" stdDeviation="3" flood-color="#94a3b8" flood-opacity="0.35"/></filter>
+  <filter id="sh"><feDropShadow dx="0" dy="1" stdDeviation="3" flood-color="#94a3b8" flood-opacity="0.30"/></filter>
 </defs>
 
-<!-- ═══════════ ZONE BACKGROUNDS ═══════════ -->
-<!-- Data Generation -->
-<rect x="12"  y="12"  width="230" height="196" rx="10" fill="#eff6ff" stroke="#93c5fd" stroke-width="1.4" stroke-dasharray="6,3"/>
-<text x="127" y="32"  text-anchor="middle" font-size="13" fill="#64748b" font-weight="700" letter-spacing=".07em">DATA GENERATION</text>
+<!-- ══════════════════ ZONE BACKGROUNDS ══════════════════ -->
 
-<!-- Inference Module -->
-<rect x="258" y="12"  width="530" height="408" rx="10" fill="#f0f9ff" stroke="#7dd3fc" stroke-width="1.4" stroke-dasharray="6,3"/>
-<text x="523" y="32"  text-anchor="middle" font-size="13" fill="#64748b" font-weight="700" letter-spacing=".07em">INFERENCE MODULE</text>
+<!-- Data Generation  (35% column, top) -->
+<rect x="12"  y="12"  width="428" height="158" rx="10"
+      fill="#eff6ff" stroke="#93c5fd" stroke-width="1.4" stroke-dasharray="6,3"/>
+<text x="226" y="32" text-anchor="middle" font-size="13" fill="#64748b" font-weight="700" letter-spacing=".07em">DATA GENERATION</text>
 
-<!-- Prototype Store (inside inference) -->
-<rect x="590" y="44"  width="182" height="248" rx="8"  fill="#f0fdf4" stroke="#86efac" stroke-width="1.2" stroke-dasharray="4,3"/>
-<text x="681" y="62"  text-anchor="middle" font-size="11" fill="#166534" font-weight="700">PROTOTYPE STORE</text>
+<!-- Inference Module  (65% column) -->
+<rect x="452" y="12"  width="816" height="346" rx="10"
+      fill="#f0f9ff" stroke="#7dd3fc" stroke-width="1.4" stroke-dasharray="6,3"/>
+<text x="860" y="32" text-anchor="middle" font-size="13" fill="#64748b" font-weight="700" letter-spacing=".07em">INFERENCE MODULE</text>
 
-<!-- State Builder -->
-<rect x="12"  y="222" width="230" height="210" rx="10" fill="#faf5ff" stroke="#d8b4fe" stroke-width="1.4" stroke-dasharray="6,3"/>
-<text x="127" y="242" text-anchor="middle" font-size="13" fill="#64748b" font-weight="700" letter-spacing=".07em">STATE BUILDER</text>
+<!-- Prototype Store  (inside inference, right side) -->
+<rect x="796" y="40"  width="462" height="270" rx="8"
+      fill="#f0fdf4" stroke="#86efac" stroke-width="1.2" stroke-dasharray="4,3"/>
+<text x="1027" y="58" text-anchor="middle" font-size="11" fill="#166534" font-weight="700">PROTOTYPE STORE</text>
 
-<!-- Agent -->
-<rect x="12"  y="446" width="766" height="256" rx="10" fill="#fafafa" stroke="#d1d5db" stroke-width="1.4" stroke-dasharray="6,3"/>
-<text x="395" y="466" text-anchor="middle" font-size="13" fill="#64748b" font-weight="700" letter-spacing=".07em">AGENT  (Two-Stream backbone)</text>
+<!-- State Builder  (35% column, below data gen) -->
+<rect x="12"  y="182" width="428" height="186" rx="10"
+      fill="#faf5ff" stroke="#d8b4fe" stroke-width="1.4" stroke-dasharray="6,3"/>
+<text x="226" y="202" text-anchor="middle" font-size="13" fill="#64748b" font-weight="700" letter-spacing=".07em">STATE BUILDER</text>
 
-<!-- Memory Buffers -->
-<rect x="792" y="446" width="456" height="256" rx="10" fill="#fdf4ff" stroke="#e879f9" stroke-width="1.4" stroke-dasharray="6,3"/>
-<text x="1020" y="466" text-anchor="middle" font-size="13" fill="#64748b" font-weight="700" letter-spacing=".07em">MEMORY BUFFERS</text>
+<!-- Agent zone -->
+<rect x="12"  y="380" width="838" height="244" rx="10"
+      fill="#fafafa" stroke="#d1d5db" stroke-width="1.4" stroke-dasharray="6,3"/>
+<text x="431" y="400" text-anchor="middle" font-size="13" fill="#64748b" font-weight="700" letter-spacing=".07em">AGENT</text>
+
+<!-- Experience Buffer zone -->
+<rect x="862" y="380" width="406" height="244" rx="10"
+      fill="#fdf4ff" stroke="#e879f9" stroke-width="1.4" stroke-dasharray="6,3"/>
+<text x="1065" y="400" text-anchor="middle" font-size="13" fill="#64748b" font-weight="700" letter-spacing=".07em">EXPERIENCE BUFFER</text>
 
 <!-- Outcomes -->
-<rect x="12"  y="718" width="1236" height="250" rx="10" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.4" stroke-dasharray="6,3"/>
-<text x="630" y="738" text-anchor="middle" font-size="13" fill="#64748b" font-weight="700" letter-spacing=".07em">ACTION OUTCOMES</text>
+<rect x="12"  y="638" width="1256" height="188" rx="10"
+      fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.4" stroke-dasharray="6,3"/>
+<text x="640" y="658" text-anchor="middle" font-size="13" fill="#64748b" font-weight="700" letter-spacing=".07em">ACTION OUTCOMES</text>
 
-<!-- ═══════════ NODES ═══════════ -->
+<!-- ══════════════════ NODES ══════════════════ -->
 
-<!-- Data Generator  cx=127  rect: x=22,y=52,w=210,h=68 -->
-<g class="node" data-tip="<strong>Data Generator</strong><br>Samples one flow per step from 7 two-dimensional Gaussians.<br><b>Known:</b> K0 benign (−2,0), K1 benign (2,0), K2 malicious (0,−2).<br><b>Unknown (label required):</b> A malicious overlapping K0, B malicious clearly separate, C benign clearly separate, D benign near K2.<br>Returns: raw point x, class ID, is-known flag, unknown cluster ID, class type.">
-  <rect x="22" y="52" width="210" height="68" rx="9" fill="#dbeafe" stroke="#1d4ed8" stroke-width="2" filter="url(#sh)"/>
-  <text x="127" y="76"  text-anchor="middle" font-size="14" font-weight="700" fill="#1e3a8a">Data Generator</text>
-  <text x="127" y="94"  text-anchor="middle" font-size="11" fill="#1d4ed8">7 Gaussian clusters (2D)</text>
-  <text x="127" y="110" text-anchor="middle" font-size="10" fill="#1e3a8a">K0, K1, K2  +  A, B, C, D</text>
+<!-- Data Generator  (cx=226, y=38–96) -->
+<g class="node" data-tip="<strong>Data Generator</strong><br>Samples one flow per step from 7 two-dimensional Gaussians.<br><b>Known (pre-trained):</b> K0 benign, K1 benign, K2 malicious.<br><b>Unknown (label required):</b> A malicious (overlaps K0), B malicious, C benign, D benign (near K2).<br>Returns: raw 2D point, class ID, is-known flag, unknown cluster ID.">
+  <rect x="22" y="38" width="408" height="58" rx="9" fill="#dbeafe" stroke="#1d4ed8" stroke-width="2" filter="url(#sh)"/>
+  <text x="226" y="62"  text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">Data Generator</text>
+  <text x="226" y="82"  text-anchor="middle" font-size="12" fill="#1d4ed8">7 Gaussian clusters (2D)  ·  3 known + 4 unknown</text>
 </g>
 
-<!-- Encoder  cx=373  rect: x=268,y=52,w=178,h=68 -->
-<g class="node" data-tip="<strong>Encoder</strong><br>Two-layer MLP: Linear(2→48) → ReLU → Linear(48→24).<br>Pre-trained for 120 epochs on the three known classes using prototypical loss.<br>Projects the raw 2D point into a 24-dimensional hidden space shared by all prototype comparisons.">
-  <rect x="268" y="52" width="178" height="68" rx="9" fill="#dbeafe" stroke="#1d4ed8" stroke-width="2" filter="url(#sh)"/>
-  <text x="357" y="76"  text-anchor="middle" font-size="14" font-weight="700" fill="#1e3a8a">Encoder</text>
-  <text x="357" y="94"  text-anchor="middle" font-size="11" fill="#1d4ed8">Linear(2→48) → ReLU</text>
-  <text x="357" y="110" text-anchor="middle" font-size="10" fill="#1e3a8a">→ Linear(48→24) → h (24D)</text>
+<!-- Encoder  (cx=562, y=38–96) -->
+<g class="node" data-tip="<strong>Encoder</strong><br>Two-layer MLP: Linear(2→48) → ReLU → Linear(48→24).<br>Pre-trained on the three known classes using prototypical loss (120 epochs).<br>Projects the raw 2D point into a 24-dimensional hidden space.">
+  <rect x="462" y="38" width="320" height="58" rx="9" fill="#dbeafe" stroke="#1d4ed8" stroke-width="2" filter="url(#sh)"/>
+  <text x="622" y="62"  text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">Encoder</text>
+  <text x="622" y="82"  text-anchor="middle" font-size="12" fill="#1d4ed8">MLP  2 → 48 → 24  (pre-trained)  →  hidden vector h</text>
 </g>
 
-<!-- is_known diamond  center(357,178)  half-w=38 half-h=30 -->
-<g class="node" data-tip="<strong>Known-class branch</strong><br>Routes the hidden vector based on whether the current flow belongs to a known class.<br>If yes → Known Classifier only.<br>If no → both Anomaly Detector (using distances from Known Classifier) and Unknown Cluster Head.">
-  <polygon points="357,148 395,178 357,208 319,178" fill="#fffbeb" stroke="#b45309" stroke-width="2"/>
-  <text x="357" y="174" text-anchor="middle" font-size="11" font-weight="700" fill="#78350f">known</text>
-  <text x="357" y="189" text-anchor="middle" font-size="11" font-weight="700" fill="#78350f">class?</text>
+<!-- is_known diamond  center(622, 162)  hw=46 hh=34 -->
+<g class="node" data-tip="<strong>Known-class branch</strong><br>Routes the hidden vector based on whether the current flow belongs to a known class.<br>Yes → Known Classifier only.<br>No → Anomaly Detector + Unknown Cluster Head.">
+  <polygon points="622,128 668,162 622,196 576,162" fill="#fffbeb" stroke="#b45309" stroke-width="2"/>
+  <text x="622" y="158" text-anchor="middle" font-size="12" font-weight="700" fill="#78350f">known</text>
+  <text x="622" y="173" text-anchor="middle" font-size="12" font-weight="700" fill="#78350f">class?</text>
 </g>
 
-<!-- Known Classifier  cx=508  rect: x=450,y=72,w=128,h=68 -->
-<g class="node" data-tip="<strong>Known Classifier</strong><br>Computes L2 distances from the hidden vector to every row in Known Prototypes.<br>Applies softmax(−distance × τ, τ=3.0) to get class probabilities.<br>Returns: predicted class index, classifier confidence (max probability), full distance vector.">
-  <rect x="450" y="72" width="128" height="68" rx="8" fill="#e0f2fe" stroke="#0369a1" stroke-width="1.8"/>
-  <text x="514" y="95"  text-anchor="middle" font-size="13" font-weight="700" fill="#0c4a6e">Known Classifier</text>
-  <text x="514" y="112" text-anchor="middle" font-size="10.5" fill="#0369a1">L2 dist → softmax(−d·τ)</text>
-  <text x="514" y="128" text-anchor="middle" font-size="10"   fill="#0c4a6e">→ class, conf, dists</text>
+<!-- Known Classifier  (cx=726, y=60–116) -->
+<g class="node" data-tip="<strong>Known Classifier</strong><br>Computes L2 distances from h to every row of Known Prototypes.<br>Applies softmax(−distance × τ, τ=3.0) → class probabilities.<br>Returns: predicted class, confidence, distance vector.">
+  <rect x="690" y="60" width="96" height="56" rx="8" fill="#e0f2fe" stroke="#0369a1" stroke-width="1.8"/>
+  <text x="738" y="82"  text-anchor="middle" font-size="13" font-weight="700" fill="#0c4a6e">Known</text>
+  <text x="738" y="98"  text-anchor="middle" font-size="13" font-weight="700" fill="#0c4a6e">Classifier</text>
+  <text x="738" y="112" text-anchor="middle" font-size="10" fill="#0369a1">L2 → softmax</text>
 </g>
 
-<!-- Anomaly Detector  cx=508  rect: x=450,y=158,w=128,h=54 -->
-<g class="node" data-tip="<strong>Anomaly Detector</strong><br>Takes the distance vector from Known Classifier.<br>Anomaly score = minimum distance to any known prototype.<br>A flow is flagged anomalous when this score exceeds threshold δ = 1.8 in hidden space.<br>Score (normalised ÷5, clipped at 1) fills one slot of the exteroceptive state.">
-  <rect x="450" y="158" width="128" height="54" rx="8" fill="#e0f2fe" stroke="#0369a1" stroke-width="1.8"/>
-  <text x="514" y="180" text-anchor="middle" font-size="13" font-weight="700" fill="#0c4a6e">Anomaly Detector</text>
-  <text x="514" y="198" text-anchor="middle" font-size="10.5" fill="#0369a1">min dist &gt; threshold (1.8)?</text>
+<!-- Anomaly Detector  (cx=726, y=134–182) -->
+<g class="node" data-tip="<strong>Anomaly Detector</strong><br>Anomaly score = min distance to any known prototype.<br>A flow is anomalous when score > δ = 1.8.<br>Normalised score fills one slot of the exteroceptive state.">
+  <rect x="690" y="134" width="96" height="48" rx="8" fill="#e0f2fe" stroke="#0369a1" stroke-width="1.8"/>
+  <text x="738" y="155" text-anchor="middle" font-size="13" font-weight="700" fill="#0c4a6e">Anomaly</text>
+  <text x="738" y="171" text-anchor="middle" font-size="13" font-weight="700" fill="#0c4a6e">Detector</text>
 </g>
 
-<!-- Unknown Cluster Head  cx=508  rect: x=450,y=232,w=128,h=72 -->
-<g class="node" data-tip="<strong>Unknown Cluster Head</strong><br>Runs only for unknown flows.<br>Computes L2 distances from the hidden vector to all four Unknown Prototype rows.<br>Soft-assigns the flow via softmax(−distance × τ) — fully differentiable.<br>Updates the matched Unknown Prototype row via EMA (α=0.08); increments Cluster Confidence and Cluster Size.">
-  <rect x="450" y="232" width="128" height="72" rx="8" fill="#e0f2fe" stroke="#0369a1" stroke-width="1.8"/>
-  <text x="514" y="255" text-anchor="middle" font-size="13" font-weight="700" fill="#0c4a6e">Unknown</text>
-  <text x="514" y="271" text-anchor="middle" font-size="13" font-weight="700" fill="#0c4a6e">Cluster Head</text>
-  <text x="514" y="290" text-anchor="middle" font-size="10.5" fill="#0369a1">soft-assign → EMA update</text>
+<!-- Unknown Cluster Head  (cx=726, y=204–268) -->
+<g class="node" data-tip="<strong>Unknown Cluster Head</strong><br>Runs for unknown flows only.<br>Soft-assigns flow to one of 4 unknown clusters via softmax(−dist × τ).<br>Updates the matched Unknown Prototype row via EMA (α = 0.08); updates Cluster Confidence.">
+  <rect x="690" y="204" width="96" height="56" rx="8" fill="#e0f2fe" stroke="#0369a1" stroke-width="1.8"/>
+  <text x="738" y="224" text-anchor="middle" font-size="13" font-weight="700" fill="#0c4a6e">Unknown</text>
+  <text x="738" y="240" text-anchor="middle" font-size="13" font-weight="700" fill="#0c4a6e">Cluster Head</text>
+  <text x="738" y="254" text-anchor="middle" font-size="10" fill="#0369a1">soft-assign → EMA</text>
 </g>
 
-<!-- Known Prototypes  cx=681  rect: x=600,y=72,w=162,h=72 -->
-<g class="node" data-tip="<strong>Known Prototypes (learnable parameter)</strong><br>Shape: (n_known × 24) — one row per known class.<br>Initially 3 rows (K0, K1, K2); grows by one row each time a label is purchased (cluster EMA prototype is copied in).<br>Updated via back-propagation during pre-training only; fixed during RL episodes.<br>Classification: L2 distances → softmax with temperature τ=3.0.">
-  <rect x="600" y="72" width="162" height="72" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="2" filter="url(#sh)"/>
-  <text x="681" y="97"  text-anchor="middle" font-size="13" font-weight="700" fill="#14532d">Known Prototypes</text>
-  <text x="681" y="113" text-anchor="middle" font-size="11"   fill="#15803d">Learnable parameter</text>
-  <text x="681" y="131" text-anchor="middle" font-size="10"   fill="#14532d">shape: (n_known × 24)</text>
+<!-- Known Prototypes  (cx=1027, y=66–130) -->
+<g class="node" data-tip="<strong>Known Prototypes (learnable parameter)</strong><br>Shape: (n_known × 24). Initially 3 rows (K0, K1, K2).<br>Grows by one row each time a label is purchased — the EMA cluster prototype is promoted here.<br>Updated by back-propagation during pre-training only.">
+  <rect x="806" y="66" width="440" height="58" rx="8" fill="#dcfce7" stroke="#15803d" stroke-width="2" filter="url(#sh)"/>
+  <text x="1026" y="90"  text-anchor="middle" font-size="15" font-weight="700" fill="#14532d">Known Prototypes</text>
+  <text x="1026" y="112" text-anchor="middle" font-size="12" fill="#15803d">Learnable parameter  ·  shape (n_known × 24)</text>
 </g>
 
-<!-- Unknown Prototypes  cx=681  rect: x=600,y=162,w=162,h=72 -->
-<g class="node" data-tip="<strong>Unknown Prototypes (EMA buffer — no gradient)</strong><br>Shape: (4 × 24) — one row per unknown cluster.<br>Updated online with exponential moving average α = 0.08 as flows are assigned.<br>Not trained by back-propagation.<br>When a label is purchased for cluster u, row u is copied to Known Prototypes and that cluster is promoted.">
-  <rect x="600" y="162" width="162" height="72" rx="8" fill="#ffedd5" stroke="#c2410c" stroke-width="2" filter="url(#sh)"/>
-  <text x="681" y="187" text-anchor="middle" font-size="13" font-weight="700" fill="#7c2d12">Unknown Prototypes</text>
-  <text x="681" y="203" text-anchor="middle" font-size="11"   fill="#c2410c">EMA buffer  (no gradient)</text>
-  <text x="681" y="221" text-anchor="middle" font-size="10"   fill="#7c2d12">shape: (4 × 24),  α = 0.08</text>
+<!-- Unknown Prototypes  (cx=1027, y=142–200) -->
+<g class="node" data-tip="<strong>Unknown Prototypes (EMA buffer — no gradient)</strong><br>Shape: (4 × 24). Updated online via EMA (α = 0.08).<br>Not trained by back-propagation.<br>When a label is purchased for cluster u, row u is promoted to Known Prototypes.">
+  <rect x="806" y="142" width="440" height="58" rx="8" fill="#ffedd5" stroke="#c2410c" stroke-width="2" filter="url(#sh)"/>
+  <text x="1026" y="166" text-anchor="middle" font-size="15" font-weight="700" fill="#7c2d12">Unknown Prototypes</text>
+  <text x="1026" y="186" text-anchor="middle" font-size="12" fill="#c2410c">EMA buffer (no gradient)  ·  shape (4 × 24),  α = 0.08</text>
 </g>
 
-<!-- Cluster Confidence & Size  cx=681  rect: x=600,y=252,w=162,h=54 -->
-<g class="node" data-tip="<strong>Cluster Confidence &amp; Cluster Size (EMA buffers)</strong><br>Confidence (4 values): running EMA assignment score per unknown cluster — 4 of the 9 proprioceptive dimensions. Zeroed immediately when a label is purchased for that cluster, producing the sharpest one-step proprioceptive change and maximum epistemic gain.<br>Size (4 values): cumulative count of flows assigned to each cluster.">
-  <rect x="600" y="252" width="162" height="54" rx="8" fill="#ede9fe" stroke="#7c3aed" stroke-width="2" filter="url(#sh)"/>
-  <text x="681" y="274" text-anchor="middle" font-size="13" font-weight="700" fill="#4c1d95">Cluster Confidence</text>
-  <text x="681" y="291" text-anchor="middle" font-size="11"   fill="#6d28d9">&amp; Cluster Size  (EMA buffers)</text>
+<!-- Cluster Confidence  (cx=1027, y=218–270) -->
+<g class="node" data-tip="<strong>Cluster Confidence (EMA buffer)</strong><br>4 running EMA assignment scores, one per unknown cluster.<br>Used directly as 4 of the 9 proprioceptive state dimensions.<br>Zeroed immediately on label purchase → sharpest one-step proprioceptive change → max epistemic gain.">
+  <rect x="806" y="218" width="440" height="54" rx="8" fill="#ede9fe" stroke="#7c3aed" stroke-width="2" filter="url(#sh)"/>
+  <text x="1026" y="242" text-anchor="middle" font-size="15" font-weight="700" fill="#4c1d95">Cluster Confidence</text>
+  <text x="1026" y="261" text-anchor="middle" font-size="12" fill="#6d28d9">EMA buffer (4D)  ·  zeroed on label purchase</text>
 </g>
 
-<!-- Exteroceptive  cx=127  rect: x=22,y=258,w=210,h=86 -->
-<g class="node" data-tip="<strong>Exteroceptive sub-vector (5 dimensions)</strong><br>[0] Predicted class index, normalised by (n_known − 1)<br>[1] Classifier confidence — max softmax probability over known prototypes<br>[2] Anomaly score — min distance to any known prototype, divided by 5 and clipped at 1<br>[3] Raw input x-coordinate divided by 5<br>[4] Raw input y-coordinate divided by 5<br>Encodes what the agent can observe about the incoming flow.">
-  <rect x="22" y="258" width="210" height="86" rx="9" fill="#dbeafe" stroke="#1d4ed8" stroke-width="2" filter="url(#sh)"/>
-  <text x="127" y="283" text-anchor="middle" font-size="14" font-weight="700" fill="#1e3a8a">Exteroceptive  (5D)</text>
-  <text x="127" y="300" text-anchor="middle" font-size="11"   fill="#1d4ed8">predicted class · confidence</text>
-  <text x="127" y="316" text-anchor="middle" font-size="11"   fill="#1d4ed8">anomaly score · input coords</text>
-  <text x="127" y="332" text-anchor="middle" font-size="10"   fill="#1e3a8a">perception of current flow</text>
+<!-- Exteroceptive  (cx=120, y=212–278, left half of state builder) -->
+<g class="node" data-tip="<strong>Exteroceptive sub-vector (5D)</strong><br>[0] Predicted class (normalised)<br>[1] Classifier confidence<br>[2] Anomaly score (normalised)<br>[3–4] Raw input coordinates ÷ 5<br>Encodes the observable properties of the current flow.">
+  <rect x="22" y="212" width="198" height="72" rx="9" fill="#dbeafe" stroke="#1d4ed8" stroke-width="2" filter="url(#sh)"/>
+  <text x="121" y="237" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">Exteroceptive</text>
+  <text x="121" y="255" text-anchor="middle" font-size="12" fill="#1d4ed8">(5D)</text>
+  <text x="121" y="274" text-anchor="middle" font-size="11" fill="#1e3a8a">class · conf · anomaly · coords</text>
 </g>
 
-<!-- Proprioceptive  cx=127  rect: x=22,y=358,w=210,h=86 -->
-<g class="node" data-tip="<strong>Proprioceptive sub-vector (9 dimensions)</strong><br>[0–3] Cluster Confidence for each unknown cluster — zeroed when that label is purchased<br>[4] Fraction of labels purchased (out of 4)<br>[5] Remaining budget as fraction of initial budget<br>[6] Current cluster's label price as fraction of initial budget (0 if known/already labelled)<br>[7] Time elapsed as fraction of max steps<br>[8] Classifier confidence (repeated from exteroceptive slot 1)">
-  <rect x="22" y="358" width="210" height="86" rx="9" fill="#ede9fe" stroke="#7c3aed" stroke-width="2" filter="url(#sh)"/>
-  <text x="127" y="383" text-anchor="middle" font-size="14" font-weight="700" fill="#4c1d95">Proprioceptive  (9D)</text>
-  <text x="127" y="400" text-anchor="middle" font-size="11"   fill="#7c3aed">cluster confidences · labels bought</text>
-  <text x="127" y="416" text-anchor="middle" font-size="11"   fill="#7c3aed">budget · price · time · conf</text>
-  <text x="127" y="432" text-anchor="middle" font-size="10"   fill="#4c1d95">internal / epistemic state</text>
+<!-- Proprioceptive  (cx=331, y=212–278, right half of state builder) -->
+<g class="node" data-tip="<strong>Proprioceptive sub-vector (9D)</strong><br>[0–3] Cluster Confidence per unknown cluster<br>[4] Labels purchased fraction<br>[5] Budget fraction<br>[6] Current cluster price fraction<br>[7] Time fraction<br>[8] Classifier confidence (repeated)<br>Encodes the agent's internal / epistemic situation.">
+  <rect x="230" y="212" width="200" height="72" rx="9" fill="#ede9fe" stroke="#7c3aed" stroke-width="2" filter="url(#sh)"/>
+  <text x="330" y="237" text-anchor="middle" font-size="15" font-weight="700" fill="#4c1d95">Proprioceptive</text>
+  <text x="330" y="255" text-anchor="middle" font-size="12" fill="#7c3aed">(9D)</text>
+  <text x="330" y="274" text-anchor="middle" font-size="11" fill="#4c1d95">cluster conf · budget · price · time</text>
 </g>
 
-<!-- State vector  cx=357  rect: x=258,y=332,w=188,h=60 -->
-<g class="node" data-tip="<strong>State vector (14 dimensions)</strong><br>Concatenation of the 5D exteroceptive and 9D proprioceptive sub-vectors.<br>Passed to the agent's Two-Stream Network at every step.<br>Each sub-vector is processed by a separate stream (48 hidden units, two ReLU layers) before being concatenated and projected to action outputs.">
-  <rect x="258" y="332" width="188" height="60" rx="9" fill="#f1f5f9" stroke="#475569" stroke-width="1.8" filter="url(#sh)"/>
-  <text x="352" y="358" text-anchor="middle" font-size="14" font-weight="700" fill="#1e293b">State vector  (14D)</text>
-  <text x="352" y="376" text-anchor="middle" font-size="11"   fill="#475569">exteroceptive (5) ‖ proprioceptive (9)</text>
+<!-- State vector  (cx=226, y=302–344) -->
+<g class="node" data-tip="<strong>State vector (14D)</strong><br>Concatenation of exteroceptive (5D) and proprioceptive (9D) sub-vectors.<br>Fed to the Two-Stream Network at every step.">
+  <rect x="22" y="302" width="408" height="44" rx="9" fill="#f1f5f9" stroke="#475569" stroke-width="1.8" filter="url(#sh)"/>
+  <text x="226" y="324" text-anchor="middle" font-size="14" font-weight="700" fill="#1e293b">State vector  (14D)  =  exteroceptive ‖ proprioceptive</text>
 </g>
 
-<!-- Two-Stream Network  cx=118  rect: x=22,y=482,w=192,h=74 -->
-<g class="node" data-tip="<strong>Two-Stream Network</strong><br>Shared backbone for all learned agents.<br>Perception stream: Linear(5→48) → ReLU → Linear(48→48) → ReLU<br>Internal stream: Linear(9→48) → ReLU → Linear(48→48) → ReLU<br>Both concatenated (96D) then projected to output dimension.<br>Output: Q-values (DDQN, Dueling, DAI variants) or policy logits (PPO, SAC).">
-  <rect x="22" y="482" width="192" height="74" rx="9" fill="#f1f5f9" stroke="#475569" stroke-width="1.8" filter="url(#sh)"/>
-  <text x="118" y="508" text-anchor="middle" font-size="14" font-weight="700" fill="#1e293b">Two-Stream Network</text>
-  <text x="118" y="526" text-anchor="middle" font-size="11"   fill="#475569">perception + internal stream</text>
-  <text x="118" y="542" text-anchor="middle" font-size="10"   fill="#64748b">48 units each → concat → output</text>
+<!-- Two-Stream Network  (cx=116, y=414–478) -->
+<g class="node" data-tip="<strong>Two-Stream Network</strong><br>Shared backbone for all learned agents.<br>Perception stream: Linear(5→48)→ReLU×2  ·  Internal stream: Linear(9→48)→ReLU×2<br>Concatenated (96D) → projected to output dim.<br>Output: Q-values (DDQN, Dueling, DAI) or policy logits (PPO, SAC).">
+  <rect x="22" y="414" width="188" height="64" rx="9" fill="#f1f5f9" stroke="#475569" stroke-width="1.8" filter="url(#sh)"/>
+  <text x="116" y="440" text-anchor="middle" font-size="14" font-weight="700" fill="#1e293b">Two-Stream</text>
+  <text x="116" y="457" text-anchor="middle" font-size="14" font-weight="700" fill="#1e293b">Network</text>
+  <text x="116" y="473" text-anchor="middle" font-size="11" fill="#475569">perception + internal stream</text>
 </g>
 
-<!-- Action select diamond  center(288,546)  half-w=46 half-h=36 -->
-<g class="node" data-tip="<strong>Action selection</strong><br>Action space: block (0), accept (1), buy label (2).<br>DDQN / Dueling: argmax Q-value with ε-greedy noise (ε decays 0.25→0.05).<br>DAI variants: Boltzmann softmax over EFE values with precision β=100 (near-deterministic).<br>PPO: sample from actor softmax.<br>SAC: Categorical from actor (maximum-entropy objective shapes distribution).">
-  <polygon points="288,510 334,546 288,582 242,546" fill="#fffbeb" stroke="#b45309" stroke-width="2.2"/>
-  <text x="288" y="541" text-anchor="middle" font-size="12" font-weight="700" fill="#78350f">action</text>
-  <text x="288" y="557" text-anchor="middle" font-size="12" font-weight="700" fill="#78350f">select</text>
+<!-- Action diamond  center(286,484)  hw=50 hh=40 -->
+<g class="node" data-tip="<strong>Action selection</strong><br>Action space: block (0), accept (1), buy label (2).<br>DDQN / Dueling: ε-greedy argmax Q.  DAI: Boltzmann(β=100) over EFE.  PPO: sample from actor.  SAC: max-entropy Categorical.">
+  <polygon points="286,444 336,484 286,524 236,484" fill="#fffbeb" stroke="#b45309" stroke-width="2.2"/>
+  <text x="286" y="479" text-anchor="middle" font-size="12" font-weight="700" fill="#78350f">action</text>
+  <text x="286" y="495" text-anchor="middle" font-size="12" font-weight="700" fill="#78350f">select</text>
 </g>
 
-<!-- Transition Network  cx=456  rect: x=364,y=482,w=184,h=74 -->
-<g class="node" data-tip="<strong>Transition Network (DAI-P, DAI-A, DAI-F only)</strong><br>Architecture: Linear(17→48) → ReLU → Linear(48→48) → ReLU → Linear(48→9)<br>Input: state vector (14D) concatenated with one-hot action (3D).<br>Output: predicted next proprioceptive sub-vector (9D).<br>Trained concurrently via MSE loss against the actual next proprioceptive state.<br>Epistemic gain = 0.5 × ‖actual − predicted‖²<br>Label purchase zeroes cluster confidence[u] — an unpredictable change that maximises prediction error, making label-purchase intrinsically valuable.">
-  <rect x="364" y="482" width="184" height="74" rx="9" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.8" filter="url(#sh)"/>
-  <text x="456" y="508" text-anchor="middle" font-size="14" font-weight="700" fill="#4c1d95">Transition Network</text>
-  <text x="456" y="526" text-anchor="middle" font-size="11"   fill="#7c3aed">predicts next internal state</text>
-  <text x="456" y="542" text-anchor="middle" font-size="10"   fill="#4c1d95">(state + action) → 9D prediction</text>
+<!-- Transition Network  (cx=464, y=414–478) -->
+<g class="node" data-tip="<strong>Transition Network (DAI-P, DAI-A, DAI-F only)</strong><br>Linear(17→48)→ReLU→Linear(48→48)→ReLU→Linear(48→9)<br>Predicts next proprioceptive sub-vector from (state, one-hot action).<br>Epistemic gain = 0.5 × ‖actual next proprio − predicted‖²<br>Label purchase zeroes cluster confidence[u] → maximum prediction error → maximum epistemic gain.">
+  <rect x="360" y="414" width="208" height="64" rx="9" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.8" filter="url(#sh)"/>
+  <text x="464" y="440" text-anchor="middle" font-size="14" font-weight="700" fill="#4c1d95">Transition</text>
+  <text x="464" y="457" text-anchor="middle" font-size="14" font-weight="700" fill="#4c1d95">Network</text>
+  <text x="464" y="473" text-anchor="middle" font-size="11" fill="#7c3aed">predicts next internal state</text>
 </g>
 
-<!-- EFE Network  cx=642  rect: x=560,y=482,w=164,h=74 -->
-<g class="node" data-tip="<strong>EFE Network (DAI variants only)</strong><br>A Two-Stream Network with output dim=3 (one EFE value per action).<br>Target: EFE(s,a) = r + epistemic_weight × epistemic_gain + γ × EFE(s′, a*)<br>Policy: Boltzmann softmax with precision β=100 (nearly deterministic).<br>Has a target copy hard-updated every 20 gradient steps.<br>Epistemic gain differs per DAI variant: perceptive (DAI-P), active (DAI-A), or combined (DAI-F).">
-  <rect x="560" y="482" width="164" height="74" rx="9" fill="#e0f2fe" stroke="#0369a1" stroke-width="1.8" filter="url(#sh)"/>
-  <text x="642" y="508" text-anchor="middle" font-size="14" font-weight="700" fill="#0c4a6e">EFE Network</text>
-  <text x="642" y="526" text-anchor="middle" font-size="11"   fill="#0369a1">Two-Stream Net → 3 EFE values</text>
-  <text x="642" y="542" text-anchor="middle" font-size="10"   fill="#0c4a6e">Boltzmann selection  (β = 100)</text>
+<!-- EFE Network  (cx=654, y=414–478) -->
+<g class="node" data-tip="<strong>EFE Network (DAI variants)</strong><br>Two-Stream Net → 3 Expected Free Energy values (one per action).<br>Policy: Boltzmann softmax with precision β=100.<br>Target: EFE(s,a) = reward + epistemic_gain + γ × EFE(s′,a*).<br>Hard-copied target network updated every 20 gradient steps.">
+  <rect x="582" y="414" width="218" height="64" rx="9" fill="#e0f2fe" stroke="#0369a1" stroke-width="1.8" filter="url(#sh)"/>
+  <text x="691" y="440" text-anchor="middle" font-size="14" font-weight="700" fill="#0c4a6e">EFE Network</text>
+  <text x="691" y="459" text-anchor="middle" font-size="12" fill="#0369a1">Two-Stream → 3 EFE values</text>
+  <text x="691" y="474" text-anchor="middle" font-size="11" fill="#0c4a6e">Boltzmann policy  (β = 100)</text>
 </g>
 
-<!-- Replay Buffer  cx=924  rect: x=808,y=482,w=232,h=74 -->
-<g class="node" data-tip="<strong>Replay Buffer (off-policy agents)</strong><br>Circular buffer holding up to 6,000 transitions.<br>Each entry: (state, action, reward, next state, done flag).<br>Used by: DDQN, Dueling DDQN, SAC, and all DAI variants.<br>Training begins only after 128 transitions are stored.<br>Mini-batches of 64 transitions sampled uniformly at random each gradient step.">
-  <rect x="808" y="482" width="232" height="74" rx="9" fill="#fae8ff" stroke="#a21caf" stroke-width="2" filter="url(#sh)"/>
-  <text x="924" y="508" text-anchor="middle" font-size="14" font-weight="700" fill="#701a75">Replay Buffer</text>
-  <text x="924" y="526" text-anchor="middle" font-size="11"   fill="#a21caf">capacity: 6,000 transitions</text>
-  <text x="924" y="542" text-anchor="middle" font-size="10"   fill="#701a75">state · action · reward · next · done</text>
+<!-- Experience Buffer  (cx=1065, y=414–478) -->
+<g class="node" data-tip="<strong>Experience Buffer</strong><br><b>Off-policy agents (DDQN, Dueling, SAC, DAI variants):</b> circular replay buffer, capacity 6,000. Stores (state, action, reward, next state, done). Mini-batches of 64 sampled randomly. Persists across episodes.<br><b>On-policy (PPO):</b> episode rollout buffer storing (state, action, reward, log-prob, value). Cleared after each episode once GAE advantage estimates and gradient epochs are computed.">
+  <rect x="872" y="414" width="384" height="64" rx="9" fill="#fae8ff" stroke="#a21caf" stroke-width="2" filter="url(#sh)"/>
+  <text x="1064" y="440" text-anchor="middle" font-size="15" font-weight="700" fill="#701a75">Experience Buffer</text>
+  <text x="1064" y="460" text-anchor="middle" font-size="12" fill="#a21caf">replay (off-policy)  ·  rollout (on-policy / PPO)</text>
+  <text x="1064" y="475" text-anchor="middle" font-size="11" fill="#701a75">capacity 6,000  ·  batch 64  ·  cleared per episode (PPO)</text>
 </g>
 
-<!-- PPO Rollout Buffer  cx=1120  rect: x=1052,y=482,w=188,h=74 -->
-<g class="node" data-tip="<strong>PPO Rollout Buffer (PPO only)</strong><br>On-policy buffer accumulating one full episode at a time.<br>Each entry: (state, action, reward, log-probability, value estimate, done flag).<br>At episode end: computes GAE advantages (λ=0.95), runs 4 gradient epochs with clipped surrogate loss (ε=0.20), value coeff=0.50, entropy bonus=0.01.<br>Buffer is cleared after each update — no experience replay.">
-  <rect x="1052" y="482" width="188" height="74" rx="9" fill="#f7fee7" stroke="#4d7c0f" stroke-width="2" filter="url(#sh)"/>
-  <text x="1146" y="508" text-anchor="middle" font-size="14" font-weight="700" fill="#365314">PPO Rollout Buffer</text>
-  <text x="1146" y="526" text-anchor="middle" font-size="11"   fill="#4d7c0f">one episode, then cleared</text>
-  <text x="1146" y="542" text-anchor="middle" font-size="10"   fill="#365314">state · action · reward · logprob · val</text>
+<!-- ── Outcome nodes ── -->
+<g class="node" data-tip="<strong>Block  (action = 0)</strong><br>Flow rejected. Reward depends on class and whether a label has been purchased.<br>Known benign = −2.5  ·  Known malicious = +2.5<br>Unlabelled unknown: A = +0.5, B = +1.5, C = −1.5, D = −1.0.">
+  <rect x="22"  y="668" width="174" height="58" rx="9" fill="#fee2e2" stroke="#b91c1c" stroke-width="2" filter="url(#sh)"/>
+  <text x="109" y="692" text-anchor="middle" font-size="14" font-weight="700" fill="#991b1b">Block</text>
+  <text x="109" y="709" text-anchor="middle" font-size="12" fill="#b91c1c">action = 0</text>
 </g>
 
-<!-- ── Outcome boxes ── -->
-<g class="node" data-tip="<strong>Block  (action = 0)</strong><br>Flow is rejected / dropped.<br>Known benign = −2.5  |  Known malicious = +2.5<br>Uninformed (unknown, unlabelled): A = +0.5, B = +1.5, C = −1.5, D = −1.0.<br>Budget unchanged. Cluster Confidence continues EMA update.">
-  <rect x="22"  y="756" width="186" height="68" rx="9" fill="#fee2e2" stroke="#b91c1c" stroke-width="2" filter="url(#sh)"/>
-  <text x="115" y="784" text-anchor="middle" font-size="14" font-weight="700" fill="#991b1b">Block</text>
-  <text x="115" y="800" text-anchor="middle" font-size="11"   fill="#b91c1c">action = 0</text>
-  <text x="115" y="815" text-anchor="middle" font-size="10"   fill="#991b1b">reward depends on class</text>
+<g class="node" data-tip="<strong>Accept  (action = 1)</strong><br>Flow forwarded. Reward depends on class and label status.<br>Known benign = +2.0  ·  Known malicious = −5.0<br>Unlabelled unknown: A = −7.0, B = −3.5, C = +0.5, D = +0.5.">
+  <rect x="208" y="668" width="174" height="58" rx="9" fill="#dcfce7" stroke="#15803d" stroke-width="2" filter="url(#sh)"/>
+  <text x="295" y="692" text-anchor="middle" font-size="14" font-weight="700" fill="#14532d">Accept</text>
+  <text x="295" y="709" text-anchor="middle" font-size="12" fill="#15803d">action = 1</text>
 </g>
 
-<g class="node" data-tip="<strong>Accept  (action = 1)</strong><br>Flow is forwarded.<br>Known benign = +2.0  |  Known malicious = −5.0<br>Uninformed (unknown, unlabelled): A = −7.0, B = −3.5, C = +0.5, D = +0.5.<br>Budget unchanged. Cluster Confidence continues EMA update.">
-  <rect x="226" y="756" width="186" height="68" rx="9" fill="#dcfce7" stroke="#15803d" stroke-width="2" filter="url(#sh)"/>
-  <text x="319" y="784" text-anchor="middle" font-size="14" font-weight="700" fill="#14532d">Accept</text>
-  <text x="319" y="800" text-anchor="middle" font-size="11"   fill="#15803d">action = 1</text>
-  <text x="319" y="815" text-anchor="middle" font-size="10"   fill="#14532d">reward depends on class</text>
+<g class="node" data-tip="<strong>Buy Label  (action = 2, if valid)</strong><br>Purchases a CTI label for the current unknown cluster u.<br>Valid when: flow is unknown, label not yet bought, budget ≥ price[u].<br>On success: cluster prototype promoted to Known Prototypes; cluster confidence[u] zeroed; budget debited.">
+  <rect x="394" y="668" width="174" height="58" rx="9" fill="#fffbeb" stroke="#b45309" stroke-width="2" filter="url(#sh)"/>
+  <text x="481" y="692" text-anchor="middle" font-size="14" font-weight="700" fill="#78350f">Buy Label</text>
+  <text x="481" y="709" text-anchor="middle" font-size="12" fill="#b45309">action = 2  (if valid)</text>
 </g>
 
-<g class="node" data-tip="<strong>Buy Label  (action = 2, if valid)</strong><br>Agent purchases a CTI label for the current unknown cluster u.<br>Valid when: the flow is unknown, label not yet bought, and budget ≥ price[u].<br>On success: cluster confidence[u] is zeroed, prototype row u promoted to Known Prototypes, future flows from cluster u classified as known.<br>Budget reduced by price[u]. Tiny immediate reward = −price × 0.05.">
-  <rect x="430" y="756" width="186" height="68" rx="9" fill="#fffbeb" stroke="#b45309" stroke-width="2" filter="url(#sh)"/>
-  <text x="523" y="784" text-anchor="middle" font-size="14" font-weight="700" fill="#78350f">Buy Label</text>
-  <text x="523" y="800" text-anchor="middle" font-size="11"   fill="#b45309">action = 2  (if valid)</text>
-  <text x="523" y="815" text-anchor="middle" font-size="10"   fill="#78350f">budget reduced by label price</text>
+<g class="node" data-tip="<strong>Prototype Promotion</strong><br>Triggered by a valid label purchase for cluster u:<br>1. EMA prototype row u copied into Known Prototypes (grows by 1 row).<br>2. Cluster confidence[u] zeroed — sharpest one-step proprioceptive change.<br>3. Future flows from cluster u classified as known and rewarded accordingly.">
+  <rect x="580" y="668" width="258" height="58" rx="9" fill="#fffbeb" stroke="#b45309" stroke-width="1.6" stroke-dasharray="5,3" filter="url(#sh)"/>
+  <text x="709" y="691" text-anchor="middle" font-size="14" font-weight="700" fill="#78350f">Prototype Promotion</text>
+  <text x="709" y="709" text-anchor="middle" font-size="12" fill="#b45309">cluster prototype → Known Protos  ·  conf[u] ← 0</text>
 </g>
 
-<g class="node" data-tip="<strong>Prototype Promotion</strong><br>Triggered by a valid label purchase for cluster u:<br>1. EMA prototype row u is copied into Known Prototypes (grows by one row).<br>2. Cluster Confidence[u] set to zero — sharpest possible one-step proprioceptive change.<br>3. Future flows from cluster u route through Known Classifier and receive informed rewards.<br>This makes label purchases intrinsically valuable for DAI-P / A / F agents.">
-  <rect x="634" y="756" width="236" height="68" rx="9" fill="#fffbeb" stroke="#b45309" stroke-width="1.6" stroke-dasharray="5,3" filter="url(#sh)"/>
-  <text x="752" y="780" text-anchor="middle" font-size="13" font-weight="700" fill="#78350f">Prototype Promotion</text>
-  <text x="752" y="796" text-anchor="middle" font-size="11"   fill="#b45309">cluster prototype → Known Prototypes</text>
-  <text x="752" y="812" text-anchor="middle" font-size="10"   fill="#78350f">cluster confidence[u] ← 0</text>
+<g class="node" data-tip="<strong>Invalid Purchase</strong><br>Triggered when buy-label attempted but:<br>(a) flow is a known class, or (b) label already purchased, or (c) budget &lt; price.<br>Penalty = −0.3. No prototype or state changes.">
+  <rect x="852" y="668" width="178" height="58" rx="9" fill="#fee2e2" stroke="#b91c1c" stroke-width="1.6" stroke-dasharray="5,3"/>
+  <text x="941" y="691" text-anchor="middle" font-size="13" font-weight="700" fill="#991b1b">Invalid Purchase</text>
+  <text x="941" y="709" text-anchor="middle" font-size="12" fill="#b91c1c">penalty = −0.3</text>
 </g>
 
-<g class="node" data-tip="<strong>Invalid Purchase</strong><br>Triggered when buy-label is attempted but:<br>(a) the current flow belongs to a known class,<br>(b) the label for this cluster is already purchased, or<br>(c) remaining budget &lt; label price.<br>Penalty = −0.3. No prototype changes. Budget unchanged.">
-  <rect x="886" y="756" width="186" height="68" rx="9" fill="#fee2e2" stroke="#b91c1c" stroke-width="1.6" stroke-dasharray="5,3"/>
-  <text x="979" y="782" text-anchor="middle" font-size="13" font-weight="700" fill="#991b1b">Invalid Purchase</text>
-  <text x="979" y="798" text-anchor="middle" font-size="11"   fill="#b91c1c">penalty = −0.3</text>
-  <text x="979" y="813" text-anchor="middle" font-size="10"   fill="#991b1b">no prototype change</text>
+<g class="node" data-tip="<strong>Episode End</strong><br>Terminates after 30 steps or when cumulative reward ≥ 40.<br>Off-policy agents: Replay Buffer persists; Inference Module resets.<br>PPO: Rollout buffer cleared and gradient update applied.">
+  <rect x="1044" y="668" width="212" height="58" rx="9" fill="#dbeafe" stroke="#1d4ed8" stroke-width="2" filter="url(#sh)"/>
+  <text x="1150" y="691" text-anchor="middle" font-size="14" font-weight="700" fill="#1e3a8a">Episode End</text>
+  <text x="1150" y="709" text-anchor="middle" font-size="12" fill="#1d4ed8">30 steps  or  reward ≥ 40</text>
 </g>
 
-<g class="node" data-tip="<strong>Episode End</strong><br>Episode terminates after 30 steps or when cumulative reward ≥ 40 (win condition).<br>Off-policy agents (DDQN, SAC, DAI variants): Replay Buffer persists; only the Inference Module is reset.<br>PPO: Rollout Buffer is cleared and a gradient update is applied before the next episode.">
-  <rect x="1088" y="756" width="158" height="68" rx="9" fill="#dbeafe" stroke="#1d4ed8" stroke-width="2" filter="url(#sh)"/>
-  <text x="1167" y="782" text-anchor="middle" font-size="13" font-weight="700" fill="#1e3a8a">Episode End</text>
-  <text x="1167" y="798" text-anchor="middle" font-size="11"   fill="#1d4ed8">30 steps or reward ≥ 40</text>
-  <text x="1167" y="813" text-anchor="middle" font-size="10"   fill="#1e3a8a">PPO: update, then clear rollout</text>
-</g>
+<!-- ══════════════════ ELBOWED ARROWS ══════════════════ -->
 
-<!-- ═══════════ ELBOWED ARROWS ═══════════ -->
-<!-- Routing uses only H and V segments (right-angle bends) -->
+<!-- 1. DataGen → Encoder  [raw 2D point] -->
+<path d="M 430,67 H 462" stroke="#1d4ed8" stroke-width="2" fill="none" marker-end="url(#m-blue)" stroke-linejoin="round"/>
+<text x="446" y="61" text-anchor="middle" font-size="11" fill="#1d4ed8">raw 2D point</text>
 
-<!-- 1. Data Generator → Encoder  [raw 2D point] -->
-<path d="M 232,86 H 268" stroke="#2563eb" stroke-width="2" fill="none" marker-end="url(#m-blue)" stroke-linejoin="round"/>
-<text x="250" y="80" text-anchor="middle" font-size="10.5" fill="#2563eb">raw 2D point</text>
+<!-- 2. DataGen → is_known  [known class? — right past gap, down, right] -->
+<path d="M 430,67 H 445 V 162 H 576" stroke="#b45309" stroke-width="1.6" fill="none" marker-end="url(#m-amber)" stroke-dasharray="5,3" stroke-linejoin="round"/>
+<text x="508" y="152" text-anchor="middle" font-size="11" fill="#b45309">known class?</text>
 
-<!-- 2. Data Generator → is_known diamond  [known class?]  down→right -->
-<path d="M 127,120 V 178 H 319" stroke="#b45309" stroke-width="1.6" fill="none" marker-end="url(#m-amber)" stroke-dasharray="5,3" stroke-linejoin="round"/>
-<text x="205" y="171" text-anchor="middle" font-size="10.5" fill="#b45309">known class?</text>
+<!-- 3. Encoder → is_known  [hidden vector, vertical] -->
+<path d="M 622,96 V 128" stroke="#1d4ed8" stroke-width="2" fill="none" marker-end="url(#m-blue)" stroke-linejoin="round"/>
+<text x="638" y="116" font-size="11" fill="#1d4ed8">h (24D)</text>
 
-<!-- 3. Encoder bottom → is_known top  [hidden vector] -->
-<path d="M 357,120 V 148" stroke="#2563eb" stroke-width="2" fill="none" marker-end="url(#m-blue)" stroke-linejoin="round"/>
-<text x="375" y="138" font-size="10.5" fill="#2563eb">hidden (24D)</text>
+<!-- 4. is_known → Known Classifier  [yes — right, up, right] -->
+<path d="M 668,162 H 680 V 88 H 690" stroke="#15803d" stroke-width="1.8" fill="none" marker-end="url(#m-green)" stroke-linejoin="round"/>
+<text x="676" y="78" font-size="11" fill="#15803d" font-weight="600">yes</text>
 
-<!-- 4. is_known → Known Classifier  [yes: right, up, right] -->
-<path d="M 395,178 H 428 V 106 H 450" stroke="#15803d" stroke-width="1.8" fill="none" marker-end="url(#m-green)" stroke-linejoin="round"/>
-<text x="438" y="96" font-size="10.5" fill="#15803d" font-weight="600">yes</text>
+<!-- 5. is_known → Anomaly Detector  [no — right, tiny V, right] -->
+<path d="M 668,162 H 680 V 158 H 690" stroke="#b91c1c" stroke-width="1.8" fill="none" marker-end="url(#m-red)" stroke-linejoin="round"/>
+<text x="676" y="148" font-size="11" fill="#b91c1c" font-weight="600">no</text>
 
-<!-- 5. is_known → Anomaly Detector  [no: right, tiny step] -->
-<path d="M 395,178 H 428 V 185 H 450" stroke="#b91c1c" stroke-width="1.8" fill="none" marker-end="url(#m-red)" stroke-linejoin="round"/>
-<text x="436" y="174" font-size="10.5" fill="#b91c1c" font-weight="600">no</text>
+<!-- 6. is_known → Unknown Cluster Head  [no — bottom down, right] -->
+<path d="M 622,196 V 232 H 690" stroke="#b91c1c" stroke-width="1.4" fill="none" marker-end="url(#m-red)" stroke-dasharray="4,2" stroke-linejoin="round"/>
 
-<!-- 6. is_known → Unknown Cluster Head  [no: down, right] -->
-<path d="M 357,208 V 268 H 450" stroke="#b91c1c" stroke-width="1.4" fill="none" marker-end="url(#m-red)" stroke-dasharray="4,2" stroke-linejoin="round"/>
+<!-- 7. Known Classifier → Known Prototypes  [horizontal] -->
+<path d="M 786,88 H 806" stroke="#15803d" stroke-width="1.8" fill="none" marker-end="url(#m-green)" stroke-linejoin="round"/>
+<text x="796" y="81" text-anchor="middle" font-size="10" fill="#15803d">distances</text>
 
-<!-- 7. Known Classifier → Known Prototypes  [distances] -->
-<path d="M 578,106 H 600" stroke="#15803d" stroke-width="1.8" fill="none" marker-end="url(#m-green)" stroke-linejoin="round"/>
-<text x="589" y="98" text-anchor="middle" font-size="10" fill="#15803d">distances</text>
+<!-- 8. Unknown Cluster Head → Unknown Prototypes  [right, up, right] -->
+<path d="M 786,232 H 794 V 171 H 806" stroke="#c2410c" stroke-width="1.8" fill="none" marker-end="url(#m-orange)" stroke-linejoin="round"/>
+<text x="800" y="204" font-size="10" fill="#c2410c">EMA update</text>
 
-<!-- 8. Unknown Cluster Head → Unknown Prototypes  [EMA update: right, up, right] -->
-<path d="M 578,262 H 588 V 198 H 600" stroke="#c2410c" stroke-width="1.8" fill="none" marker-end="url(#m-orange)" stroke-linejoin="round"/>
-<text x="594" y="233" font-size="10" fill="#c2410c">EMA update</text>
+<!-- 9. Unknown Cluster Head → Cluster Confidence  [right, tiny V, right] -->
+<path d="M 786,248 H 794 V 245 H 806" stroke="#7c3aed" stroke-width="1.6" fill="none" marker-end="url(#m-purple)" stroke-linejoin="round"/>
 
-<!-- 9. Unknown Cluster Head → Cluster Confidence  [right, down, right] -->
-<path d="M 578,290 H 588 V 279 H 600" stroke="#7c3aed" stroke-width="1.6" fill="none" marker-end="url(#m-purple)" stroke-linejoin="round"/>
+<!-- 10. Known Classifier → Exteroceptive  [down to y=284, left to extero right(220)] -->
+<path d="M 738,116 V 284 H 220" stroke="#1d4ed8" stroke-width="1.5" fill="none" marker-end="url(#m-blue)" stroke-dasharray="4,2" stroke-linejoin="round"/>
+<text x="480" y="278" text-anchor="middle" font-size="11" fill="#1d4ed8">predicted class, confidence</text>
 
-<!-- 10. Known Classifier → Exteroceptive  [pred class + conf: down far, then left]
-         Entry point on Exteroceptive right edge at y=293 (slightly above center) -->
-<path d="M 514,140 V 293 H 232" stroke="#2563eb" stroke-width="1.5" fill="none" marker-end="url(#m-blue)" stroke-dasharray="4,2" stroke-linejoin="round"/>
-<text x="380" y="287" text-anchor="middle" font-size="10.5" fill="#2563eb">predicted class, confidence</text>
+<!-- 11. Anomaly Detector → Exteroceptive  [left to x=454, down to y=266, left to extero right] -->
+<path d="M 690,158 H 454 V 266 H 220" stroke="#1d4ed8" stroke-width="1.5" fill="none" marker-end="url(#m-blue)" stroke-dasharray="4,2" stroke-linejoin="round"/>
+<text x="418" y="295" text-anchor="middle" font-size="11" fill="#1d4ed8">anomaly score</text>
 
-<!-- 11. Anomaly Detector → Exteroceptive  [anomaly score: down far, then left]
-         Entry on Exteroceptive right edge at y=315 (below the one above) -->
-<path d="M 450,185 H 426 V 315 H 232" stroke="#2563eb" stroke-width="1.5" fill="none" marker-end="url(#m-blue)" stroke-dasharray="4,2" stroke-linejoin="round"/>
-<text x="330" y="335" text-anchor="middle" font-size="10.5" fill="#2563eb">anomaly score</text>
+<!-- 12. DataGen → Exteroceptive  [left side, down] -->
+<path d="M 22,67 H 10 V 248 H 22" stroke="#1d4ed8" stroke-width="1.4" fill="none" marker-end="url(#m-blue)" stroke-dasharray="4,2" stroke-linejoin="round"/>
+<text x="4" y="160" text-anchor="middle" font-size="10" fill="#1d4ed8" transform="rotate(-90,4,160)">raw coords</text>
 
-<!-- 12. Data Generator → Exteroceptive  [raw coords: down left side] -->
-<path d="M 22,86 H 10 V 301 H 22" stroke="#2563eb" stroke-width="1.4" fill="none" marker-end="url(#m-blue)" stroke-dasharray="4,2" stroke-linejoin="round"/>
-<text x="4" y="194" text-anchor="middle" font-size="10" fill="#2563eb" transform="rotate(-90,4,194)">raw coords</text>
+<!-- 13. Cluster Confidence → Proprioceptive  [long horizontal left — same y=248] -->
+<path d="M 806,248 H 430" stroke="#7c3aed" stroke-width="1.6" fill="none" marker-end="url(#m-purple)" stroke-dasharray="4,2" stroke-linejoin="round"/>
+<text x="618" y="240" text-anchor="middle" font-size="11" fill="#7c3aed">cluster confidences</text>
 
-<!-- 13. Cluster Confidence → Proprioceptive  [cluster confidences: left across, down, left] -->
-<path d="M 600,279 H 258 V 401 H 232" stroke="#7c3aed" stroke-width="1.6" fill="none" marker-end="url(#m-purple)" stroke-dasharray="4,2" stroke-linejoin="round"/>
-<text x="415" y="394" text-anchor="middle" font-size="10.5" fill="#7c3aed">cluster confidences</text>
+<!-- 14. Exteroceptive → State vector  [vertical down] -->
+<path d="M 121,284 V 302" stroke="#475569" stroke-width="2" fill="none" marker-end="url(#m-grey)" stroke-linejoin="round"/>
 
-<!-- 14. Exteroceptive → State  [right, down, right] -->
-<path d="M 232,294 H 248 V 362 H 258" stroke="#475569" stroke-width="2" fill="none" marker-end="url(#m-grey)" stroke-linejoin="round"/>
+<!-- 15. Proprioceptive → State vector  [vertical down] -->
+<path d="M 330,284 V 302" stroke="#475569" stroke-width="2" fill="none" marker-end="url(#m-grey)" stroke-linejoin="round"/>
+<text x="306" y="298" text-anchor="end" font-size="11" fill="#475569">state (14D)</text>
 
-<!-- 15. Proprioceptive → State  [right, up] -->
-<path d="M 232,394 V 362 H 258" stroke="#475569" stroke-width="2" fill="none" marker-end="url(#m-grey)" stroke-linejoin="round"/>
-<text x="248" y="356" text-anchor="middle" font-size="10.5" fill="#475569">state (14D)</text>
+<!-- 16. State vector → Two-Stream Network  [down, left, down] -->
+<path d="M 160,346 V 394 H 116 V 414" stroke="#475569" stroke-width="2" fill="none" marker-end="url(#m-grey)" stroke-linejoin="round"/>
+<text x="82" y="386" text-anchor="middle" font-size="11" fill="#475569">state (14D)</text>
 
-<!-- 16. State → Two-Stream Network  [down, left, down] -->
-<path d="M 352,392 V 434 H 118 V 482" stroke="#475569" stroke-width="2" fill="none" marker-end="url(#m-grey)" stroke-linejoin="round"/>
-<text x="222" y="428" text-anchor="middle" font-size="10.5" fill="#475569">state (14D)</text>
+<!-- 17. State vector → Transition Network  [right, down, right, down] -->
+<path d="M 300,346 V 388 H 464 V 414" stroke="#7c3aed" stroke-width="1.6" fill="none" marker-end="url(#m-purple)" stroke-dasharray="5,2" stroke-linejoin="round"/>
 
-<!-- 17. State → Transition Network  [down, right, down] -->
-<path d="M 352,392 V 434 H 456 V 482" stroke="#7c3aed" stroke-width="1.6" fill="none" marker-end="url(#m-purple)" stroke-dasharray="5,2" stroke-linejoin="round"/>
+<!-- 18. State vector → EFE Network  [right, down] -->
+<path d="M 380,346 V 400 H 691 V 414" stroke="#0369a1" stroke-width="1.6" fill="none" marker-end="url(#m-sky)" stroke-dasharray="5,2" stroke-linejoin="round"/>
 
-<!-- 18. State → EFE Network  [down, right, down] -->
-<path d="M 352,392 V 434 H 642 V 482" stroke="#0369a1" stroke-width="1.6" fill="none" marker-end="url(#m-sky)" stroke-dasharray="5,2" stroke-linejoin="round"/>
+<!-- 19. Two-Stream → action select  [right, down] -->
+<path d="M 210,446 H 236 V 484" stroke="#b45309" stroke-width="2.2" fill="none" marker-end="url(#m-amber)" stroke-linejoin="round"/>
+<text x="218" y="440" font-size="11" fill="#b45309">Q / logits</text>
 
-<!-- 19. Two-Stream Network → Action select  [right, down] -->
-<path d="M 214,519 H 242 V 546" stroke="#b45309" stroke-width="2.2" fill="none" marker-end="url(#m-amber)" stroke-linejoin="round"/>
-<text x="222" y="513" font-size="10.5" fill="#b45309">Q-values / logits</text>
+<!-- 20. Transition Net → action select  [left, down — epistemic gain] -->
+<path d="M 360,430 H 336 V 484" stroke="#7c3aed" stroke-width="1.6" fill="none" marker-end="url(#m-purple)" stroke-dasharray="4,2" stroke-linejoin="round"/>
+<text x="348" y="424" text-anchor="middle" font-size="11" fill="#7c3aed">epistemic gain</text>
 
-<!-- 20. EFE Network → Action select  [left, down] -->
-<path d="M 560,519 V 546 H 334" stroke="#0369a1" stroke-width="1.6" fill="none" marker-end="url(#m-sky)" stroke-dasharray="5,2" stroke-linejoin="round"/>
-<text x="452" y="565" text-anchor="middle" font-size="10.5" fill="#0369a1">EFE values</text>
-
-<!-- 21. Transition Network → Action select  [left, down] -->
-<path d="M 364,519 H 334 V 546" stroke="#7c3aed" stroke-width="1.6" fill="none" marker-end="url(#m-purple)" stroke-dasharray="4,2" stroke-linejoin="round"/>
-<text x="346" y="513" font-size="10.5" fill="#7c3aed">epistemic gain</text>
+<!-- 21. EFE Net → action select  [left, down] -->
+<path d="M 582,460 V 484 H 336" stroke="#0369a1" stroke-width="1.6" fill="none" marker-end="url(#m-sky)" stroke-dasharray="5,2" stroke-linejoin="round"/>
+<text x="460" y="475" text-anchor="middle" font-size="11" fill="#0369a1">EFE values</text>
 
 <!-- 22. Action select → Block  [down, left, down] -->
-<path d="M 288,582 V 658 H 115 V 756" stroke="#b91c1c" stroke-width="1.8" fill="none" marker-end="url(#m-red)" stroke-linejoin="round"/>
-<text x="138" y="654" font-size="11" fill="#b91c1c">block</text>
+<path d="M 286,524 V 614 H 109 V 668" stroke="#b91c1c" stroke-width="1.8" fill="none" marker-end="url(#m-red)" stroke-linejoin="round"/>
+<text x="130" y="610" font-size="12" fill="#b91c1c">block</text>
 
 <!-- 23. Action select → Accept  [down, right, down] -->
-<path d="M 288,582 V 670 H 319 V 756" stroke="#15803d" stroke-width="1.8" fill="none" marker-end="url(#m-green)" stroke-linejoin="round"/>
-<text x="340" y="666" font-size="11" fill="#15803d">accept</text>
+<path d="M 286,524 V 624 H 295 V 668" stroke="#15803d" stroke-width="1.8" fill="none" marker-end="url(#m-green)" stroke-linejoin="round"/>
+<text x="312" y="620" font-size="12" fill="#15803d">accept</text>
 
 <!-- 24. Action select → Buy Label  [down, right, down] -->
-<path d="M 288,582 V 686 H 523 V 756" stroke="#b45309" stroke-width="1.8" fill="none" marker-end="url(#m-amber)" stroke-linejoin="round"/>
-<text x="420" y="700" font-size="11" fill="#b45309">buy label</text>
+<path d="M 286,524 V 636 H 481 V 668" stroke="#b45309" stroke-width="1.8" fill="none" marker-end="url(#m-amber)" stroke-linejoin="round"/>
+<text x="392" y="650" text-anchor="middle" font-size="12" fill="#b45309">buy label</text>
 
 <!-- 25. Buy Label → Prototype Promotion  [horizontal] -->
-<path d="M 616,790 H 634" stroke="#b45309" stroke-width="1.8" fill="none" marker-end="url(#m-amber)" stroke-linejoin="round"/>
-<text x="625" y="784" text-anchor="middle" font-size="10" fill="#b45309">if valid</text>
+<path d="M 568,697 H 580" stroke="#b45309" stroke-width="1.8" fill="none" marker-end="url(#m-amber)" stroke-linejoin="round"/>
+<text x="574" y="689" text-anchor="middle" font-size="10" fill="#b45309">valid</text>
 
 <!-- 26. Buy Label → Invalid Purchase  [down, right, up] -->
-<path d="M 523,824 V 858 H 979 V 824" stroke="#b91c1c" stroke-width="1.4" fill="none" marker-end="url(#m-red)" stroke-dasharray="4,2" stroke-linejoin="round"/>
-<text x="748" y="874" text-anchor="middle" font-size="10.5" fill="#b91c1c">if invalid</text>
+<path d="M 481,726 V 772 H 941 V 726" stroke="#b91c1c" stroke-width="1.4" fill="none" marker-end="url(#m-red)" stroke-dasharray="4,2" stroke-linejoin="round"/>
+<text x="710" y="790" text-anchor="middle" font-size="11" fill="#b91c1c">invalid</text>
 
-<!-- 27. Prototype Promotion → Known Prototypes  [feedback up right side] -->
-<path d="M 870,758 H 886 V 36 H 681 V 72" stroke="#15803d" stroke-width="1.4" fill="none" marker-end="url(#m-green)" stroke-dasharray="6,3" stroke-linejoin="round"/>
-<text x="892" y="424" font-size="11" fill="#15803d" transform="rotate(90,892,424)">promote prototype</text>
+<!-- 27. Prototype Promotion → Known Prototypes  [feedback — right, up, left, down into Known Protos top] -->
+<path d="M 838,668 H 856 V 30 H 1026 V 66" stroke="#15803d" stroke-width="1.4" fill="none" marker-end="url(#m-green)" stroke-dasharray="6,3" stroke-linejoin="round"/>
+<text x="862" y="350" font-size="11" fill="#15803d" transform="rotate(90,862,350)">promote prototype</text>
 
-<!-- 28. Action select → Replay Buffer  [right, up, right] -->
-<path d="M 334,538 V 519 H 808" stroke="#a21caf" stroke-width="1.6" fill="none" marker-end="url(#m-pink)" stroke-dasharray="5,2" stroke-linejoin="round"/>
-<text x="572" y="513" text-anchor="middle" font-size="10.5" fill="#a21caf">store transition — off-policy agents</text>
+<!-- 28. Action select → Experience Buffer  [right, up] -->
+<path d="M 336,476 V 446 H 872" stroke="#a21caf" stroke-width="1.6" fill="none" marker-end="url(#m-pink)" stroke-dasharray="5,2" stroke-linejoin="round"/>
+<text x="605" y="438" text-anchor="middle" font-size="11" fill="#a21caf">store experience</text>
 
-<!-- 29. Action select → PPO Rollout Buffer  [right, down, right] -->
-<path d="M 334,554 V 574 H 1146 V 556" stroke="#4d7c0f" stroke-width="1.6" fill="none" marker-end="url(#m-lime)" stroke-dasharray="5,2" stroke-linejoin="round"/>
-<text x="750" y="590" text-anchor="middle" font-size="10.5" fill="#4d7c0f">store rollout — PPO only</text>
+<!-- 29. Episode End top — from agent/outcome area -->
+<path d="M 1150,638 V 668" stroke="#1d4ed8" stroke-width="1.6" fill="none" marker-end="url(#m-blue)" stroke-dasharray="4,2" stroke-linejoin="round"/>
 
-<!-- 30. Episode End top  -->
-<path d="M 1167,718 V 756" stroke="#2563eb" stroke-width="1.6" fill="none" marker-end="url(#m-blue)" stroke-dasharray="4,2" stroke-linejoin="round"/>
-
-<!-- 31. Episode loop back  [right → up → left to State] -->
-<path d="M 1246,790 H 1254 V 362 H 446" stroke="#94a3b8" stroke-width="1.3" fill="none" marker-end="url(#m-grey)" stroke-dasharray="6,3" stroke-linejoin="round"/>
-<text x="1246" y="590" font-size="10.5" fill="#94a3b8" transform="rotate(90,1246,590)">next episode</text>
+<!-- 30. Episode loop back  [right → up → into DataGen right] -->
+<path d="M 1256,697 H 1270 V 67 H 430" stroke="#94a3b8" stroke-width="1.3" fill="none" marker-end="url(#m-grey)" stroke-dasharray="6,3" stroke-linejoin="round"/>
+<text x="1264" y="380" font-size="11" fill="#94a3b8" transform="rotate(90,1264,380)">next episode</text>
 
 </svg>
 
@@ -418,8 +368,7 @@
   <div class="leg-item"><div class="leg-dot" style="background:#c2410c"></div>Unknown prototypes (EMA buffer)</div>
   <div class="leg-item"><div class="leg-dot" style="background:#7c3aed"></div>Internal state / Transition Network</div>
   <div class="leg-item"><div class="leg-dot" style="background:#b45309"></div>Action selection / label purchase</div>
-  <div class="leg-item"><div class="leg-dot" style="background:#a21caf"></div>Replay Buffer (off-policy)</div>
-  <div class="leg-item"><div class="leg-dot" style="background:#4d7c0f"></div>PPO Rollout Buffer (on-policy)</div>
+  <div class="leg-item"><div class="leg-dot" style="background:#a21caf"></div>Experience Buffer</div>
   <div class="leg-item"><div class="leg-dot" style="background:#0369a1"></div>EFE Network (DAI variants)</div>
 </div>
 
